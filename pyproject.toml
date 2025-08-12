@@ -1,0 +1,13 @@
+[project]
+name = "gitsnow"
+version = "0.2.0"
+description = "Tools to manage Snowflake objects in a declarative way."
+readme = "README.md"
+
+[project.scripts]
+sdt = "gitsnow.cli:cli"
+
+[tool.uv.workspace]
+members = [
+    "cli",
+]

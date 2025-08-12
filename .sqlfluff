@@ -1,0 +1,17 @@
+[sqlfluff]
+dialect = snowflake
+rules = core
+
+[sqlfluff:rules:capitalisation.keywords]
+capitalisation_policy = lower
+[sqlfluff:rules:capitalisation.identifiers]
+extended_capitalisation_policy = lower
+unquoted_identifiers_policy = all
+[sqlfluff:rules:capitalisation.functions]
+extended_capitalisation_policy = lower
+[sqlfluff:rules:capitalisation.types]
+extended_capitalisation_policy = lower
+[sqlfluff:rules:references.quoting]
+prefer_quoted_identifiers = False
+case_sensitive = False
+prefer_quoted_keywords = True
