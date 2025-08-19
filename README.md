@@ -1,15 +1,28 @@
-# Intended usage
+# gitsnow
 
+Easily sync objects from git to snowflake (deployment), and from snowflake to git (drift detection and reintegration).
 
-## Local
+## Debug
 
- To write out db to folder as formatted create scripts: 
- `gitsnow db-to-folder --scripts-dir schemas --db-name MyDatabase`
+To write out db to folder as formatted create scripts:
+ `uv run python -m debugpy --listen localhost:5678 -m cli.cli db-to-folder --scripts-dir schemas --db-name MyDatabase`
+
+To create a script to deploy changes in dependency order:
+ `uv run python -m debugpy --listen localhost:5678 -m cli.cli folder-to-script --scripts-dir schemas --db-name MyDatabase --output-file last_deployment.sql`
+
+## Intended usage
+
+The primary commands to sync changes will be...
+
+### Local
+
+To write out db to folder as formatted create scripts:
+`gitsnow db-to-folder --scripts-dir schemas --db-name MyDatabase`
 
 To create a script to deploy changes in dependency order:
  `gitsnow folder-to-script --scripts-dir schemas --db-name MyDatabase --output-file last_deployment.sql`
 
- ## Snowflake - todo
+### Snowflake - todo
 
 To push a commit with any db drift: `gitsnow_push_drift('@your_git_stage/branches/main/schemas')`
 To generate a script to apply the changes from main: `gitsnow_script_pull('@your_git_stage/branches/main/schemas')`
