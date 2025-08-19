@@ -1,12 +1,9 @@
-import re
 import click
-import os
-import re
 from pathlib import Path
 
 from . import db
 from .db_mock import get_mock_connection
-from .dependencies import get_dependency_ordered_files
+from .dependencies import get_dependency_ordered_objects
 from .format import format_sql
 from .diff import compare_file_to_db
 from sqlfluff.core import Linter, FluffConfig
@@ -65,7 +62,7 @@ def folder_to_script(scripts_dir, output_file, test):
     conn = db.get_connection() if not test else get_mock_connection()
 
     try:
-        ordered_files = get_dependency_ordered_files(scripts_path)
+        ordered_files = [path for (_, path, _) in get_dependency_ordered_objects(scripts_path)]
         click.echo(f"Found {len(ordered_files)} total objects. Checking for changes...")
 
         changed_files = []
@@ -119,6 +116,28 @@ def folder_to_script(scripts_dir, output_file, test):
         if conn and not test:
             conn.close()
 
+@cli.command(name='show-dependencies')
+@click.option('--scripts-dir', required=True, type=click.Path(exists=True, file_okay=False, dir_okay=True), help="Directory containing the SQL scripts.")
+@click.option('--ignore-prefixes', default="", show_default=True, help="Comma-separated list of schema prefixes to ignore for no-dependencies output.")
+def show_dependencies(scripts_dir, ignore_prefixes):
+    """
+    Output the dependency graph in plain text.
+    """
+    scripts_path = Path(scripts_dir)
+    dependency_ordered_objects = get_dependency_ordered_objects(scripts_path)
+
+    for obj, _, dependencies in dependency_ordered_objects:
+        if dependencies:
+            click.echo(f"{obj}:")
+            for dep in dependencies:
+                click.echo(f"  - {dep}")
+            click.echo()
+
+    schema_prefixes_to_ignore_no_dependencies = tuple(prefix.strip() for prefix in ignore_prefixes.split(',') if len(prefix.strip()))
+    click.echo("Objects with no dependencies:")
+    for obj, _, dependencies in dependency_ordered_objects:
+        if not dependencies and not obj.startswith(schema_prefixes_to_ignore_no_dependencies):
+            click.echo(f"{obj}")
 
 if __name__ == '__main__':
     cli()
