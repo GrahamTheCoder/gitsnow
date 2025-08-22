@@ -16,7 +16,7 @@ def get_connection() -> snowflake.connector.SnowflakeConnection:
     try:
         toml_path = os.path.expanduser("~/.snowflake/connections.toml")
         config = toml.load(toml_path)
-        conn_info = config.values()[0]
+        _, conn_info = list(config.items())[0]
 
         # Load private key
         with open(conn_info["private_key_path"], "rb") as key_file:
