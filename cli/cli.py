@@ -131,11 +131,12 @@ def show_dependencies(scripts_dir, ignore_prefixes):
                 click.echo(f"  - {dep}")
             click.echo()
 
-    schema_prefixes_to_ignore_no_dependencies = tuple(prefix.strip() for prefix in ignore_prefixes.split(',') if len(prefix.strip()))
-    click.echo("Objects with no dependencies:")
-    for obj, _, dependencies in dependency_ordered_objects:
-        if not dependencies and not obj.startswith(schema_prefixes_to_ignore_no_dependencies):
-            click.echo(f"{obj}")
+    schema_prefixes_to_ignore_no_dependants = tuple(prefix.strip() for prefix in ignore_prefixes.split(',') if len(prefix.strip()))
+    click.echo("Unreferenced objects:")
+    zero_references = set(obj for obj, _, _ in dependency_ordered_objects) - set(dep for _, _, deps in dependency_ordered_objects for dep in deps)
+    for obj in zero_references:
+        if not obj.startswith(schema_prefixes_to_ignore_no_dependants):
+            click.echo(f"  - {obj}")
 
 if __name__ == '__main__':
     cli()
