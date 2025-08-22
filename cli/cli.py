@@ -98,9 +98,7 @@ def folder_to_script(scripts_dir, output_file, test):
                 f_full.write(f"create schema if not exists {schema};\n")
 
             for file_path in changed_files:
-                f_full.write(f"use schema {file_path.parent.parent.name};\n")
                 relative_path = file_path.relative_to(scripts_path.parent)
-
                 f_full.write(f"-- Deploying: {relative_path}\n")
                 f_full.write(f"use schema {file_path.parent.parent.name};\n")
                 script_text = file_path.read_text()
