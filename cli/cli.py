@@ -50,7 +50,7 @@ def db_to_folder(ctx, db_name, schemas, test):
         for schema_name in schemas:
             objects = db.get_objects_in_schema(conn, db_name, schema_name)
             for obj in objects:
-                obj_type_dir = output_path / schema_name.lower() / obj.type.lower()
+                obj_type_dir = output_path / schema_name.lower() / (obj.type.lower() + 's')
                 obj_type_dir.mkdir(parents=True, exist_ok=True)
                 formatted_ddl = format_sql(obj.ddl)
                 file_path = obj_type_dir / f"{obj.name.lower()}.sql"

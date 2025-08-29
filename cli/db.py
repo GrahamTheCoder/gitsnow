@@ -61,17 +61,12 @@ def get_all_schemas(conn, db_name: str) -> list[str]:
 def get_objects_in_schema(conn: snowflake.connector.SnowflakeConnection, db_name: str, schema_name: str, cursor=None) -> list[SnowflakeObject]:
     """Fetches all supported objects (tables, views, procedures, dynamic tables) in a schema using a single SHOW OBJECTS call."""
     objects = []
-    type_map = {
-        "TABLE": "tables",
-        "VIEW": "views",
-        "PROCEDURE": "procedures"
-    }
 
     def _make_snowflake_object(cursor, kind_label: str, ddl_name: str, simple_name: str):
         ddl = get_ddl(cursor, kind_label, ddl_name)
         if not ddl:
             return None
-        return SnowflakeObject(name=simple_name, type=type_map.get(kind_label, kind_label.lower()), ddl=ddl)
+        return SnowflakeObject(name=simple_name, type=kind_label, ddl=ddl)
 
     def _get_objects(cursor):
         upper_db = db_name.upper()
@@ -88,15 +83,15 @@ def get_objects_in_schema(conn: snowflake.connector.SnowflakeConnection, db_name
             full_name = f'"{db_name}"."{schema_name}"."{simple_name}"'
             obj = None
 
-            if kind in ("TABLE", "VIEW"):
-                obj = _make_snowflake_object(cursor, kind, full_name, simple_name)
-            elif kind == "PROCEDURE":
+            if kind == "PROCEDURE":
                 cursor.execute(f'SHOW PROCEDURES LIKE \'{simple_name}\' IN SCHEMA "{db_name}"."{schema_name}"')
                 proc_rows = cursor.fetchall()
                 for prow in proc_rows:
                     arg_types = prow[7]
                     ddl_name = f'{full_name}({arg_types})'
                     obj = _make_snowflake_object(cursor, "PROCEDURE", ddl_name, simple_name)
+            else:
+                obj = _make_snowflake_object(cursor, kind, full_name, simple_name)
             
             if obj:
                 objects.append(obj)
@@ -142,7 +137,7 @@ def _fixup_ddl_and_type(cursor, db_name: str, schema_name: str, kind_label: str,
     )
 
     # If dynamic table, replace column list with full definitions (including types)
-    if kind_label.upper() == "TABLE" or kind_label.upper() == "VIEW":
+    if kind_label.upper() == "TABLE":
         # Find the column list in the DDL
         match = re.search(r'(CREATE\s.*?\()(.*?)(\)\s*TARGET_LAG)', ddl, re.DOTALL | re.IGNORECASE)
         if match:
