@@ -30,6 +30,22 @@ def get_mock_connection():
                 ]
             elif "SHOW PROCEDURES" in query:
                 self.fetchall.return_value = []
+            elif "SHOW USER FUNCTIONS" in query:
+                self.fetchall.return_value = [
+                    (None, 'MY_FUNCTION', None, None, None, None, None, None),
+                ]
+            elif "SHOW USER PROCEDURES" in query:
+                self.fetchall.return_value = [
+                    (None, 'MY_PROCEDURE', None, None, None, None, None, 'VARCHAR', None),
+                ]
+            elif "SHOW STREAMS" in query:
+                self.fetchall.return_value = [
+                    (None, 'MY_STREAM', None, None, None, None, None, None),
+                ]
+            elif "SHOW TASKS" in query:
+                self.fetchall.return_value = [
+                    (None, 'MY_TASK', None, None, None, None, None, None),
+                ]
             elif "GET_DDL" in query:
                 match = re.search(r"GET_DDL\('.*?', '(.*?)'\)", query)
                 if match:
@@ -50,6 +66,14 @@ def get_mock_connection():
                         self.fetchone.return_value = ('CREATE TABLE "MOCK_DB"."MY_SCHEMA"."RESERVED_KEYWORD_TEST" ("ORDER" INT);',)
                     elif "dynamic_table_test" in obj_name:
                         self.fetchone.return_value = ('CREATE OR replace transient dynamic table "MOCK_DB"."MY_SCHEMA"."DYNAMIC_TABLE_TEST" LAG = \'1 MINUTE\' WAREHOUSE = \'MY_WH\' AS SELECT * FROM "MOCK_DB"."MY_SCHEMA"."BASE_TABLE";',)
+                    elif "my_function" in obj_name:
+                        self.fetchone.return_value = ('CREATE OR REPLACE FUNCTION "MOCK_DB"."MY_SCHEMA"."MY_FUNCTION"() RETURNS VARCHAR AS $$ SELECT \'Hello World\' $$;',)
+                    elif "my_procedure" in obj_name:
+                        self.fetchone.return_value = ('CREATE OR REPLACE PROCEDURE "MOCK_DB"."MY_SCHEMA"."MY_PROCEDURE"() RETURNS VARCHAR LANGUAGE SQL AS $$ BEGIN RETURN \'Hello\'; END $$;',)
+                    elif "my_stream" in obj_name:
+                        self.fetchone.return_value = ('CREATE OR REPLACE STREAM "MOCK_DB"."MY_SCHEMA"."MY_STREAM" ON TABLE "MOCK_DB"."MY_SCHEMA"."BASE_CUSTOMERS";',)
+                    elif "my_task" in obj_name:
+                        self.fetchone.return_value = ('CREATE OR REPLACE TASK "MOCK_DB"."MY_SCHEMA"."MY_TASK" WAREHOUSE = \'MY_WH\' SCHEDULE = \'USING CRON 0 0 * * * UTC\' AS SELECT 1;',)
                     else:
                         self.fetchone.return_value = (f'-- MOCK DDL for {query}',)
                 else:

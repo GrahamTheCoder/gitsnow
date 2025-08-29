@@ -1,4 +1,5 @@
 import os
+from snowflake.connector.cursor import SnowflakeCursor
 import toml
 import snowflake.connector
 from cryptography.hazmat.primitives import serialization
@@ -49,7 +50,7 @@ def get_connection() -> snowflake.connector.SnowflakeConnection:
         tb = traceback.format_exc()
         raise ConnectionError(f"Failed to connect: {e}\nStack trace:\n{tb}")
 
-def get_all_schemas(conn, db_name: str) -> list[str]:
+def get_all_schemas(conn: snowflake.connector.SnowflakeConnection, db_name: str) -> list[str]:
     """Fetches all non-system schemas in a given database."""
     with conn.cursor() as cursor:
         cursor.execute(f"SHOW SCHEMAS IN DATABASE \"{db_name}\"")
@@ -59,7 +60,7 @@ def get_all_schemas(conn, db_name: str) -> list[str]:
 
 
 def get_objects_in_schema(conn: snowflake.connector.SnowflakeConnection, db_name: str, schema_name: str, cursor=None) -> list[SnowflakeObject]:
-    """Fetches all supported objects (tables, views, procedures, dynamic tables) in a schema using a single SHOW OBJECTS call."""
+    """Fetches all supported objects in a schema including functions, procedures, streams, and tasks."""
     objects = []
 
     def _make_snowflake_object(cursor, kind_label: str, ddl_name: str, simple_name: str):
@@ -68,33 +69,89 @@ def get_objects_in_schema(conn: snowflake.connector.SnowflakeConnection, db_name
             return None
         return SnowflakeObject(name=simple_name, type=kind_label, ddl=ddl)
 
-    def _get_objects(cursor):
+    def _get_objects_from_show_command(cursor, show_command: str, object_type: str, name_column_index: int = 1, args_column_index: int | None = None):
+        """Generic function to fetch objects using different SHOW commands."""
+        try:
+            cursor.execute(show_command)
+            rows = cursor.fetchall()
+            
+            for row in rows:
+                simple_name = row[name_column_index]
+                full_name = f'"{db_name}"."{schema_name}"."{simple_name}"'
+                
+                # Handle procedures with arguments
+                if object_type == "PROCEDURE" and args_column_index is not None and len(row) > args_column_index:
+                    arg_types = row[args_column_index]
+                    ddl_name = f'{full_name}({arg_types})'
+                else:
+                    ddl_name = full_name
+                
+                obj = _make_snowflake_object(cursor, object_type, ddl_name, simple_name)
+                if obj:
+                    objects.append(obj)
+        except Exception as e:
+            print(f"[Warning] Failed to execute {show_command}: {e}")
+
+    def _get_objects(cursor: SnowflakeCursor):
         upper_db = db_name.upper()
         upper_schema = schema_name.upper()
         if upper_db in ("SNOWFLAKE",) or upper_schema in ("INFORMATION_SCHEMA",):
             return
 
-        cursor.execute(f'SHOW OBJECTS IN SCHEMA "{db_name}"."{schema_name}"')
-        rows = cursor.fetchall()
+        # Get objects from SHOW OBJECTS (tables, views, etc.)
+        try:
+            cursor.execute(f'SHOW OBJECTS IN SCHEMA "{db_name}"."{schema_name}"')
+            rows = cursor.fetchall()
 
-        for row in rows:
-            simple_name = row[1]
-            kind = (row[4] or "").upper()
-            full_name = f'"{db_name}"."{schema_name}"."{simple_name}"'
-            obj = None
+            for row in rows:
+                simple_name = row[1]
+                kind = (row[4] or "").upper()
+                full_name = f'"{db_name}"."{schema_name}"."{simple_name}"'
+                
+                if kind == "PROCEDURE":
+                    # Handle procedures specially to get arguments
+                    _get_objects_from_show_command(
+                        cursor, 
+                        f'SHOW PROCEDURES LIKE \'{simple_name}\' IN SCHEMA "{db_name}"."{schema_name}"',
+                        "PROCEDURE",
+                        name_column_index=1,
+                        args_column_index=7
+                    )
+                else:
+                    obj = _make_snowflake_object(cursor, kind, full_name, simple_name)
+                    if obj:
+                        objects.append(obj)
+        except Exception as e:
+            print(f"[Warning] Failed to get objects from SHOW OBJECTS: {e}")
 
-            if kind == "PROCEDURE":
-                cursor.execute(f'SHOW PROCEDURES LIKE \'{simple_name}\' IN SCHEMA "{db_name}"."{schema_name}"')
-                proc_rows = cursor.fetchall()
-                for prow in proc_rows:
-                    arg_types = prow[7]
-                    ddl_name = f'{full_name}({arg_types})'
-                    obj = _make_snowflake_object(cursor, "PROCEDURE", ddl_name, simple_name)
-            else:
-                obj = _make_snowflake_object(cursor, kind, full_name, simple_name)
-            
-            if obj:
-                objects.append(obj)
+        # Get user functions
+        _get_objects_from_show_command(
+            cursor,
+            f'SHOW USER FUNCTIONS IN SCHEMA "{db_name}"."{schema_name}"',
+            "FUNCTION"
+        )
+
+        # Get user procedures (alternative method)
+        _get_objects_from_show_command(
+            cursor,
+            f'SHOW USER PROCEDURES IN SCHEMA "{db_name}"."{schema_name}"',
+            "PROCEDURE",
+            args_column_index=7
+        )
+
+        # Get streams
+        _get_objects_from_show_command(
+            cursor,
+            f'SHOW STREAMS IN SCHEMA "{db_name}"."{schema_name}"',
+            "STREAM"
+        )
+
+        # Get tasks
+        _get_objects_from_show_command(
+            cursor,
+            f'SHOW TASKS IN SCHEMA "{db_name}"."{schema_name}"',
+            "TASK"
+        )
 
     if cursor:
         _get_objects(cursor)
@@ -104,7 +161,7 @@ def get_objects_in_schema(conn: snowflake.connector.SnowflakeConnection, db_name
 
     return objects
 
-def get_ddl(cursor, obj_type: str, fully_qualified_name: str) -> str | None:
+def get_ddl(cursor: SnowflakeCursor, obj_type: str, fully_qualified_name: str) -> str | None:
     [db_name, schema_name, simple_name] = fully_qualified_name.replace('"', '').split('.')
     ddl = get_ddl_raw(cursor, obj_type, fully_qualified_name)
     if ddl.startswith("-- Failed to get DDL"):
@@ -113,7 +170,7 @@ def get_ddl(cursor, obj_type: str, fully_qualified_name: str) -> str | None:
     ddl = _fixup_ddl_and_type(cursor, db_name, schema_name, obj_type, ddl, simple_name)
     return ddl
 
-def get_ddl_raw(cursor, obj_type: str, obj_name: str) -> str:
+def get_ddl_raw(cursor: SnowflakeCursor, obj_type: str, obj_name: str) -> str:
     """Generic function to get DDL for any object."""
     try:
         cursor.execute(f"SELECT GET_DDL('{obj_type}', '{obj_name}', TRUE)")
@@ -124,13 +181,13 @@ def get_ddl_raw(cursor, obj_type: str, obj_name: str) -> str:
         return f"-- Failed to get DDL for {obj_name}: {e}\nStack trace:\n{tb}"
 
 
-def _fixup_ddl_and_type(cursor, db_name: str, schema_name: str, kind_label: str, ddl: str, simple_name: str) -> str:
+def _fixup_ddl_and_type(cursor: SnowflakeCursor, db_name: str, schema_name: str, kind_label: str, ddl: str, simple_name: str) -> str:
     """
     Fixes up DDL for Snowflake objects, and for dynamic tables, replaces column list with full definitions from DESCRIBE TABLE.
     """
     # Replace db_name.schema_name (case-insensitive) with schema_name before first '('
     ddl = re.sub(
-        rf'(CREATE\s[^(]*){db_name}\.({schema_name}\s*[^(]*\()',
+        rf'(CREATE\s[^(]*){db_name}\.({schema_name}\.)',
         r'\1\2',
         ddl,
         flags=re.IGNORECASE
@@ -146,12 +203,12 @@ def _fixup_ddl_and_type(cursor, db_name: str, schema_name: str, kind_label: str,
             desc_rows = cursor.fetchall()
             col_defs = []
             for row in desc_rows:
-                if row[2] == "COLUMN":
-                    # row[0]=name, row[1]=type
-                    col_type = row[1]
-                    # Replace NUMBER(38, 0) with INTEGER
+                (col_name, col_type, row_type, is_nullable, _, _, _, _, _, comment) = row[0:10]
+                if row_type == "COLUMN":
                     col_type = re.sub(r'NUMBER\(38,\s*0\)', 'INTEGER', col_type, flags=re.IGNORECASE)
-                    col_defs.append(f'{row[0]} {col_type}')
+                    null_str = " NOT NULL" if is_nullable == "N" else ""
+                    comment_str = f" COMMENT '{comment}'" if comment else ""
+                    col_defs.append(f'{col_name} {col_type}{null_str}{comment_str}')
             full_col_def = ',\n    '.join(col_defs)
             # Replace the column list in the DDL
             ddl = ddl[:match.start(2)] + full_col_def + ddl[match.end(2):]

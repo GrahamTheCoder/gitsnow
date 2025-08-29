@@ -66,7 +66,7 @@ class SqlFormatter:
     def _force_create_or_alter_table(self, script_text: str) -> str:
         """Replace CREATE OR REPLACE TABLE with CREATE OR ALTER TABLE since tables shouldn't be replaced as it'll nuke their data."""
         script_text = re.sub(
-            r'create\s+(or\s+replace\s+)?((local|global|temp|temporary|volatile|transient)\s+)*table',
+            r'create\s+(or\s+replace\s+)?(transient\s+)?table',
             r'create or alter \2table',
             script_text,
             flags=re.IGNORECASE
