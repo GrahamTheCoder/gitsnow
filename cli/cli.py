@@ -6,23 +6,36 @@ from .db_mock import get_mock_connection
 from .dependencies import get_dependency_ordered_objects
 from .format import format_sql
 from .diff import compare_file_to_db
+from .container import configure_services
 from sqlfluff.core import Linter, FluffConfig
 
 config = FluffConfig(overrides={"dialect": "snowflake"})
 linter = Linter(config=config)
 
 @click.group()
-def cli():
+@click.option('--scripts-dir', required=True, type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+              help="Directory containing the SQL scripts. Configuration will be read from its parent directory.")
+@click.pass_context
+def cli(ctx, scripts_dir):
     """A CLI tool for Snowflake DevOps."""
-    pass
+    # Ensure that ctx.obj exists and is a dict (it will be passed to subcommands)
+    ctx.ensure_object(dict)
+    
+    # Configure services with the parent directory of scripts_dir for config
+    config_path = scripts_dir.parent
+    configure_services(config_path)
+    
+    # Store scripts_dir in context for use by subcommands
+    ctx.obj['scripts_dir'] = scripts_dir
 
 @cli.command(name='db-to-folder')
-@click.option('--scripts-dir', required=True, type=click.Path(file_okay=False, dir_okay=True), help="Directory to output the scripts to.")
 @click.option('--db-name', envvar='SNOWFLAKE_DATABASE', required=True, help="Snowflake database name.")
 @click.option('--schema', 'schemas', multiple=True, help="Specific schema(s) to export. Can be used multiple times. If not provided, all schemas are exported.")
 @click.option('--test', is_flag=True, help="Use a mock connection for testing.")
-def db_to_folder(scripts_dir, db_name, schemas, test):
+@click.pass_context
+def db_to_folder(ctx, db_name, schemas, test):
     """Export all DB objects' canonical DDL into files under the output folder."""
+    scripts_dir = ctx.obj['scripts_dir']
     output_path = Path(scripts_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
@@ -52,11 +65,12 @@ def db_to_folder(scripts_dir, db_name, schemas, test):
             conn.close()
 
 @cli.command(name='folder-to-script')
-@click.option('--scripts-dir', required=True, type=click.Path(exists=True, file_okay=False, dir_okay=True), help="Directory containing the SQL scripts.")
 @click.option('--output-file', required=True, type=click.Path(dir_okay=False), help="File to write the deployment SQL to.")
 @click.option('--test', is_flag=True, help="Use a mock connection for testing.")
-def folder_to_script(scripts_dir, output_file, test):
+@click.pass_context
+def folder_to_script(ctx, output_file, test):
     """Generate a SQL deployment script for objects that changed compared to the folder."""
+    scripts_dir = ctx.obj['scripts_dir']
     scripts_path = Path(scripts_dir)
 
     conn = db.get_connection() if not test else get_mock_connection()
@@ -115,12 +129,13 @@ def folder_to_script(scripts_dir, output_file, test):
             conn.close()
 
 @cli.command(name='show-dependencies')
-@click.option('--scripts-dir', required=True, type=click.Path(exists=True, file_okay=False, dir_okay=True), help="Directory containing the SQL scripts.")
 @click.option('--ignore-prefixes', default="", show_default=True, help="Comma-separated list of schema prefixes to ignore for no-dependencies output.")
-def show_dependencies(scripts_dir, ignore_prefixes):
+@click.pass_context
+def show_dependencies(ctx, ignore_prefixes):
     """
     Output the dependency graph in plain text.
     """
+    scripts_dir = ctx.obj['scripts_dir']
     scripts_path = Path(scripts_dir)
     dependency_ordered_objects = get_dependency_ordered_objects(scripts_path)
 

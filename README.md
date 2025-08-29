@@ -2,13 +2,36 @@
 
 Easily sync objects from git to snowflake (deployment), and from snowflake to git (drift detection and reintegration).
 
+## Usage
+
+All commands require a `--scripts-dir` option that specifies the directory containing your SQL scripts. The sqlfluff configuration will be automatically read from the parent directory of the scripts directory (looking for `.sqlfluff` file).
+
+### Basic structure
+```
+project/
+├── .sqlfluff              # Configuration file (automatically detected)
+└── schemas/               # Scripts directory (passed to --scripts-dir)
+    └── my_schema/
+        ├── tables/
+        │   └── customers.sql
+        └── views/
+            └── customer_summary.sql
+```
+
+### Commands
+
+All commands follow this pattern:
+```bash
+gitsnow --scripts-dir <path-to-scripts> <command> [command-options]
+```
+
 ## Debug
 
 To write out db to folder as formatted create scripts:
- `uv run python -m debugpy --listen localhost:5678 -m cli.cli db-to-folder --scripts-dir schemas --db-name MyDatabase`
+ `uv run python -m debugpy --listen localhost:5678 -m cli.cli --scripts-dir schemas db-to-folder --db-name MyDatabase`
 
 To create a script to deploy changes in dependency order:
- `uv run python -m debugpy --listen localhost:5678 -m cli.cli folder-to-script --scripts-dir schemas --db-name MyDatabase --output-file last_deployment.sql`
+ `uv run python -m debugpy --listen localhost:5678 -m cli.cli --scripts-dir schemas folder-to-script --db-name MyDatabase --output-file last_deployment.sql`
 
 ## Intended usage
 
@@ -17,10 +40,10 @@ The primary commands to sync changes will be...
 ### Local
 
 To write out db to folder as formatted create scripts:
-`gitsnow db-to-folder --scripts-dir schemas --db-name MyDatabase`
+`gitsnow --scripts-dir schemas db-to-folder --db-name MyDatabase`
 
 To create a script to deploy changes in dependency order:
- `gitsnow folder-to-script --scripts-dir schemas --db-name MyDatabase --output-file last_deployment.sql`
+ `gitsnow --scripts-dir schemas folder-to-script --db-name MyDatabase --output-file last_deployment.sql`
 
 ### Snowflake - todo
 

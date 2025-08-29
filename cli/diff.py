@@ -1,10 +1,9 @@
-import sqlfluff
 import snowflake.connector
 from pathlib import Path
 from sqlfluff.core import Linter, FluffConfig
 import re
 
-from .format import format_sql
+from .format import get_formatter
 from .db import get_ddl
 
 def get_db_object_details(sql_text: str, dialect="snowflake"):
@@ -68,8 +67,9 @@ def compare_file_to_db(file_path: Path, conn: snowflake.connector.SnowflakeConne
         unquoted_db_sql = re.sub(r'\"([A-Z_][A-Z0-9_$]*)\"', r'\1', db_sql)
 
         # Semantic comparison by formatting both strings
-        formatted_file_sql = format_sql(file_sql)
-        formatted_db_sql = format_sql(unquoted_db_sql)
+        formatter = get_formatter()
+        formatted_file_sql = formatter.format_sql(file_sql)
+        formatted_db_sql = formatter.format_sql(unquoted_db_sql)
 
         if formatted_file_sql != formatted_db_sql:
             return True, "Schema mismatch"
