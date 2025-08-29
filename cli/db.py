@@ -57,38 +57,6 @@ def get_all_schemas(conn, db_name: str) -> list[str]:
         return [row[1] for row in cursor if row[1] not in ('INFORMATION_SCHEMA', 'PUBLIC')]
 
 
-def fixup_ddl_and_type(cursor, db_name: str, schema_name: str, kind_label: str, ddl: str, simple_name: str) -> str:
-    """
-    Fixes up DDL for Snowflake objects, and for dynamic tables, replaces column list with full definitions from DESCRIBE TABLE.
-    """
-    # Replace db_name.schema_name (case-insensitive) with schema_name before first '('
-    ddl = re.sub(
-        rf'(CREATE\s[^(]*){db_name}\.({schema_name}\s*[^(]*\()',
-        r'\1\2',
-        ddl,
-        flags=re.IGNORECASE
-    )
-
-    # If dynamic table, replace column list with full definitions (including types)
-    if kind_label.upper() == "TABLE" or kind_label.upper() == "VIEW":
-        # Find the column list in the DDL
-        match = re.search(r'(CREATE\s.*?\()(.*?)(\)\s*TARGET_LAG)', ddl, re.DOTALL | re.IGNORECASE)
-        if match:
-            # Get full column definitions from DESCRIBE TABLE
-            cursor.execute(f'DESCRIBE TABLE "{db_name}"."{schema_name}"."{simple_name}"')
-            desc_rows = cursor.fetchall()
-            col_defs = []
-            for row in desc_rows:
-                if row[2] == "COLUMN":
-                    # row[0]=name, row[1]=type
-                    col_type = row[1]
-                    # Replace NUMBER(38, 0) with INTEGER
-                    col_type = re.sub(r'NUMBER\(38,\s*0\)', 'INTEGER', col_type, flags=re.IGNORECASE)
-                    col_defs.append(f'{row[0]} {col_type}')
-            full_col_def = ',\n    '.join(col_defs)
-            # Replace the column list in the DDL
-            ddl = ddl[:match.start(2)] + full_col_def + ddl[match.end(2):]
-    return ddl
 
 def get_objects_in_schema(conn: snowflake.connector.SnowflakeConnection, db_name: str, schema_name: str, cursor=None) -> list[SnowflakeObject]:
     """Fetches all supported objects (tables, views, procedures, dynamic tables) in a schema using a single SHOW OBJECTS call."""
@@ -101,10 +69,8 @@ def get_objects_in_schema(conn: snowflake.connector.SnowflakeConnection, db_name
 
     def _make_snowflake_object(cursor, kind_label: str, ddl_name: str, simple_name: str):
         ddl = get_ddl(cursor, kind_label, ddl_name)
-        if ddl.startswith("-- Failed to get DDL"):
-            print(f"[DDL Permission] Cannot get DDL for {kind_label.lower()}: {ddl_name}\n{ddl}")
+        if not ddl:
             return None
-        ddl = fixup_ddl_and_type(cursor, db_name, schema_name, kind_label, ddl, simple_name)
         return SnowflakeObject(name=simple_name, type=type_map.get(kind_label, kind_label.lower()), ddl=ddl)
 
     def _get_objects(cursor):
@@ -143,7 +109,16 @@ def get_objects_in_schema(conn: snowflake.connector.SnowflakeConnection, db_name
 
     return objects
 
-def get_ddl(cursor, obj_type: str, obj_name: str) -> str:
+def get_ddl(cursor, obj_type: str, fully_qualified_name: str) -> str | None:
+    [db_name, schema_name, simple_name] = fully_qualified_name.replace('"', '').split('.')
+    ddl = get_ddl_raw(cursor, obj_type, fully_qualified_name)
+    if ddl.startswith("-- Failed to get DDL"):
+        print(f"[DDL Permission] Cannot get DDL for {obj_type.lower()}: {fully_qualified_name}\n{ddl}")
+        return None
+    ddl = _fixup_ddl_and_type(cursor, db_name, schema_name, obj_type, ddl, simple_name)
+    return ddl
+
+def get_ddl_raw(cursor, obj_type: str, obj_name: str) -> str:
     """Generic function to get DDL for any object."""
     try:
         cursor.execute(f"SELECT GET_DDL('{obj_type}', '{obj_name}', TRUE)")
@@ -152,3 +127,37 @@ def get_ddl(cursor, obj_type: str, obj_name: str) -> str:
     except snowflake.connector.errors.ProgrammingError as e:
         tb = traceback.format_exc()
         return f"-- Failed to get DDL for {obj_name}: {e}\nStack trace:\n{tb}"
+
+
+def _fixup_ddl_and_type(cursor, db_name: str, schema_name: str, kind_label: str, ddl: str, simple_name: str) -> str:
+    """
+    Fixes up DDL for Snowflake objects, and for dynamic tables, replaces column list with full definitions from DESCRIBE TABLE.
+    """
+    # Replace db_name.schema_name (case-insensitive) with schema_name before first '('
+    ddl = re.sub(
+        rf'(CREATE\s[^(]*){db_name}\.({schema_name}\s*[^(]*\()',
+        r'\1\2',
+        ddl,
+        flags=re.IGNORECASE
+    )
+
+    # If dynamic table, replace column list with full definitions (including types)
+    if kind_label.upper() == "TABLE" or kind_label.upper() == "VIEW":
+        # Find the column list in the DDL
+        match = re.search(r'(CREATE\s.*?\()(.*?)(\)\s*TARGET_LAG)', ddl, re.DOTALL | re.IGNORECASE)
+        if match:
+            # Get full column definitions from DESCRIBE TABLE
+            cursor.execute(f'DESCRIBE TABLE "{db_name}"."{schema_name}"."{simple_name}"')
+            desc_rows = cursor.fetchall()
+            col_defs = []
+            for row in desc_rows:
+                if row[2] == "COLUMN":
+                    # row[0]=name, row[1]=type
+                    col_type = row[1]
+                    # Replace NUMBER(38, 0) with INTEGER
+                    col_type = re.sub(r'NUMBER\(38,\s*0\)', 'INTEGER', col_type, flags=re.IGNORECASE)
+                    col_defs.append(f'{row[0]} {col_type}')
+            full_col_def = ',\n    '.join(col_defs)
+            # Replace the column list in the DDL
+            ddl = ddl[:match.start(2)] + full_col_def + ddl[match.end(2):]
+    return ddl

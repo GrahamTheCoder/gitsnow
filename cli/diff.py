@@ -1,10 +1,71 @@
+import click
 import snowflake.connector
 from pathlib import Path
 from sqlfluff.core import Linter, FluffConfig
-import re
 
 from .format import get_formatter
 from .db import get_ddl
+
+def get_semantic_structure(parsed_tree):
+    """Extract semantic elements, ignoring comments and whitespace."""
+    semantic_elements = []
+    
+    def traverse(segment):
+        # Skip comment segments and whitespace-only segments
+        if segment.is_type("comment") or (hasattr(segment, 'raw') and segment.raw.isspace()):
+            return
+        
+        # For meaningful segments, collect their type and content
+        if hasattr(segment, 'segments') and segment.segments:
+            for child in segment.segments:
+                traverse(child)
+        else:
+            # Leaf node - collect normalized content
+            if hasattr(segment, 'raw') and segment.raw.strip():
+                semantic_elements.append({
+                    'type': segment.get_type(),
+                    'content': segment.raw.strip()  # Keep original case, formatter will handle normalization
+                })
+    
+    traverse(parsed_tree)
+    return semantic_elements
+
+
+def are_semantically_equal(sql1: str, sql2: str, dialect="snowflake"):
+    """Compare two SQL statements semantically, ignoring comments and whitespace."""
+    # Use formatter to standardize both SQL statements (handles casing, formatting, etc.)
+    formatter = get_formatter()
+    
+    try:
+        formatted_sql1 = formatter.format_sql(sql1)
+        formatted_sql2 = formatter.format_sql(sql2)
+        
+        # Parse formatted SQL to extract semantic structure
+        config = FluffConfig(overrides={"dialect": dialect})
+        linter = Linter(config=config)
+        
+        parsed1 = linter.parse_string(formatted_sql1)
+        parsed2 = linter.parse_string(formatted_sql2)
+        
+        if not parsed1.tree or not parsed2.tree:
+            return formatted_sql1.strip() == formatted_sql2.strip()
+        
+        semantic1 = get_semantic_structure(parsed1.tree)
+        semantic2 = get_semantic_structure(parsed2.tree)
+        
+        return semantic1 == semantic2
+    except (AttributeError, TypeError, ValueError):
+        # If parsing fails, fall back to formatted string comparison
+        try:
+            formatted_sql1 = formatter.format_sql(sql1)
+            formatted_sql2 = formatter.format_sql(sql2)
+            click.echo("Warning: SQL parsing failed, falling back to formatted string comparison.")
+            return formatted_sql1.strip() == formatted_sql2.strip()
+        except (AttributeError, TypeError, ValueError):
+            # If formatting also fails, use simple comparison
+            click.echo("Warning: SQL formatting failed, falling back to simple string comparison.")
+            return sql1.strip() == sql2.strip()
+
 
 def get_db_object_details(sql_text: str, dialect="snowflake"):
     """Parses SQL text to find the name and type of the created object."""
@@ -45,7 +106,7 @@ def get_db_object_details(sql_text: str, dialect="snowflake"):
     raise ValueError("Could not find a supported CREATE statement in the file.")
 
 
-def compare_file_to_db(file_path: Path, conn: snowflake.connector.SnowflakeConnection):
+def semantic_diff(conn: snowflake.connector.SnowflakeConnection, file_path: Path):
     """
     Compares a local SQL file definition with the corresponding object in Snowflake.
     Returns a tuple of (bool, str) indicating (is_different, reason).
@@ -53,35 +114,29 @@ def compare_file_to_db(file_path: Path, conn: snowflake.connector.SnowflakeConne
     try:
         file_sql = file_path.read_text()
         obj_type, obj_name = get_db_object_details(file_sql)
+        if len(obj_name.split('.')) < 2:
+            return False, "Cannot determine full object name"
+        if len(obj_name.split('.')) == 2:
+            obj_name = f'"{conn.database}".{obj_name}'
 
         with conn.cursor() as cursor:
             db_sql = get_ddl(cursor, obj_type, obj_name)
 
-        if db_sql.startswith("-- DDL for") or db_sql.startswith("-- Failed to get DDL"):
-            return True, "Object does not exist in DB"
+        if not db_sql:
+            return True, f"{obj_type} '{obj_name}' does not exist in DB"
 
-        if obj_type == 'TABLE':
-            db_sql = re.sub('create or replace table', 'create or alter table', db_sql, flags=re.IGNORECASE)
-
-        # Unquote identifiers before formatting
-        unquoted_db_sql = re.sub(r'\"([A-Z_][A-Z0-9_$]*)\"', r'\1', db_sql)
-
-        # Semantic comparison by formatting both strings
-        formatter = get_formatter()
-        formatted_file_sql = formatter.format_sql(file_sql)
-        formatted_db_sql = formatter.format_sql(unquoted_db_sql)
-
-        if formatted_file_sql != formatted_db_sql:
-            return True, "Schema mismatch"
+        # Semantic comparison ignoring comments and whitespace
+        if not are_semantically_equal(db_sql, file_sql):
+            return True, "SQL mismatch"
 
         return False, "In sync"
 
     except ValueError:
         # File doesn't contain a valid CREATE statement.
         return False, "Not a creatable object"
-    except snowflake.connector.errors.ProgrammingError:
+    except (snowflake.connector.errors.ProgrammingError, AttributeError, TypeError):
         # This can happen if the object doesn't exist, which we treat as a difference.
         return True, "Object does not exist in DB"
-    except Exception as e:
-        # For other errors, assume a difference to be safe.
+    except (IOError, OSError) as e:
+        # For file or connection errors, assume a difference to be safe.
         return True, f"Error during comparison: {e}"
