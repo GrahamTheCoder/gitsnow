@@ -115,7 +115,6 @@ def folder_to_script(ctx, db_name, output_file, test):
             for file_path in changed_files:
                 relative_path = file_path.relative_to(scripts_path.parent)
                 f_full.write(f"-- Deploying: {relative_path}\n")
-                f_full.write(f"use schema {file_path.parent.parent.name};\n")
                 script_text = file_path.read_text()
                 f_full.write(script_text)
                 f_full.write("\n\n")
