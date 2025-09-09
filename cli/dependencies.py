@@ -31,7 +31,7 @@ def extract_dependency_graph(root_dir: Path) -> tuple[dict[str, Path], dict[str,
             runner = LineageRunner(file_path=file_path, dialect=DIALECT, sql=file_path.read_text(encoding="utf-8"))
             targets: list[Table] = runner.target_tables
         except Exception as e:
-            print(f"Skipping {file_path}: {e}", file=sys.stderr)
+            print(f"Skipping {file_path}: {e}\n", file=sys.stderr)
             continue # Ignore files that cannot be parsed at all
 
         if not targets:
