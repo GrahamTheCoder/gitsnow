@@ -153,5 +153,20 @@ def show_dependencies(ctx, ignore_prefixes):
         if not obj.startswith(schema_prefixes_to_ignore_no_dependants):
             click.echo(f"  - {obj}")
 
+    obj_to_path = {obj: path for obj, path, _ in dependency_ordered_objects}
+    referenced_deps = set(dep for _, _, deps in dependency_ordered_objects for dep in deps)
+
+    unknown_deps = set()
+    for dep in referenced_deps:
+        path = obj_to_path.get(dep)
+        # Treat missing mapping or falsy path (e.g. None) as unknown
+        if not path:
+            unknown_deps.add(dep)
+
+    if unknown_deps:
+        click.echo("\nReferenced dependencies with no known path:")
+        for dep in sorted(unknown_deps):
+            click.echo(f"  - {dep}")
+
 if __name__ == '__main__':
     cli()
