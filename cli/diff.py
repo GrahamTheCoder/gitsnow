@@ -67,6 +67,25 @@ def are_semantically_equal(sql1: str, sql2: str, dialect="snowflake"):
             return sql1.strip() == sql2.strip()
 
 
+def get_objects_from_files(db_name: str, file_paths: list[Path]) -> list[tuple[str, str]]:
+    """
+    Parses a list of SQL files to get the object type and fully qualified name for each.
+    """
+    object_identifiers = []
+    for file_path in file_paths:
+        try:
+            file_sql = file_path.read_text()
+            obj_type, obj_name = get_db_object_details(file_sql)
+            if len(obj_name.split('.')) < 2:
+                click.echo(f"Warning: Cannot determine full object name for {file_path}. Skipping.")
+                continue
+            if len(obj_name.split('.')) == 2:
+                obj_name = f'"{db_name}".{obj_name}'
+            object_identifiers.append((obj_type, obj_name))
+        except (ValueError, IOError) as e:
+            click.echo(f"Warning: Could not parse object from {file_path}: {e}")
+    return object_identifiers
+
 def get_db_object_details(sql_text: str, dialect="snowflake"):
     """Parses SQL text to find the name and type of the created object."""
     config = FluffConfig(overrides={"dialect": dialect})
@@ -106,10 +125,11 @@ def get_db_object_details(sql_text: str, dialect="snowflake"):
     raise ValueError("Could not find a supported CREATE statement in the file.")
 
 
-def semantic_diff(conn: snowflake.connector.SnowflakeConnection, file_path: Path):
+def semantic_diff(conn: snowflake.connector.SnowflakeConnection, file_path: Path, db_sql: str | None = None):
     """
     Compares a local SQL file definition with the corresponding object in Snowflake.
     Returns a tuple of (bool, str) indicating (is_different, reason).
+    If db_sql is provided, it is used as the database DDL instead of fetching it.
     """
     try:
         file_sql = file_path.read_text()
@@ -119,8 +139,10 @@ def semantic_diff(conn: snowflake.connector.SnowflakeConnection, file_path: Path
         if len(obj_name.split('.')) == 2:
             obj_name = f'"{conn.database}".{obj_name}'
 
-        with conn.cursor() as cursor:
-            db_sql = get_ddl(cursor, obj_type, obj_name)
+        # If db_sql is not provided, fetch it from the database
+        if db_sql is None:
+            with conn.cursor() as cursor:
+                db_sql = get_ddl(cursor, obj_type, obj_name)
 
         if not db_sql:
             return True, f"{obj_type} '{obj_name}' does not exist in DB"
