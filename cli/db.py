@@ -180,6 +180,38 @@ def get_ddl_raw(cursor: SnowflakeCursor, obj_type: str, obj_name: str) -> str:
         tb = traceback.format_exc()
         return f"-- Failed to get DDL for {obj_name}: {e}\nStack trace:\n{tb}"
 
+def get_all_ddls(conn: snowflake.connector.SnowflakeConnection, objects: list[tuple[str, str]]) -> dict[str, str]:
+    """
+    Fetches DDL for a list of objects in a single query.
+    """
+    if not objects:
+        return {}
+
+    # Build a UNION ALL query to fetch all DDLs at once
+    union_queries = []
+    for obj_type, obj_name in objects:
+        union_queries.append(f"SELECT '{obj_name}' as obj_name, GET_DDL('{obj_type}', '{obj_name}', TRUE) as ddl")
+
+    full_query = "\nUNION ALL\n".join(union_queries)
+
+    with conn.cursor() as cursor:
+        try:
+            cursor.execute(full_query)
+            rows = cursor.fetchall()
+
+            ddl_map = {}
+            for row in rows:
+                obj_name, ddl = row
+                if ddl and not ddl.startswith("-- Failed to get DDL"):
+                    # Perform the same DDL fixup as the single get_ddl
+                    [db_name, schema_name, simple_name] = obj_name.replace('"', '').split('.')
+                    ddl = _fixup_ddl_and_type(cursor, db_name, schema_name, "UNKNOWN", ddl, simple_name)
+                    ddl_map[obj_name] = ddl
+            return ddl_map
+        except snowflake.connector.errors.ProgrammingError as e:
+            tb = traceback.format_exc()
+            print(f"-- Failed to execute batch DDL query: {e}\nStack trace:\n{tb}")
+            return {}
 
 def _fixup_ddl_and_type(cursor: SnowflakeCursor, db_name: str, schema_name: str, kind_label: str, ddl: str, simple_name: str) -> str:
     """
