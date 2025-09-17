@@ -7,6 +7,7 @@ from sqllineage.core.models import Table
 
 DIALECT = "snowflake"
 
+
 def extract_dependency_graph(root_dir: Path) -> tuple[dict[str, Path], dict[str, set[str]]]:
     """
     Scan all .sql files and return:
@@ -26,24 +27,43 @@ def extract_dependency_graph(root_dir: Path) -> tuple[dict[str, Path], dict[str,
     path_by_obj: dict[str, Path] = {}
     dependencies_by_obj: dict[str, set[str]] = {}
 
+    expected_names = set((p.parent.parent.name + "." + p.stem).upper() for p in sql_files)
+
     for file_path in sql_files:
+        runner: LineageRunner | None = None
+        target_tables: list[Table] = []
+        source_tables: list[Table] = []
         try:
-            runner = LineageRunner(file_path=file_path, dialect=DIALECT, sql=file_path.read_text(encoding="utf-8"))
-            targets: list[Table] = runner.target_tables
+            runner = LineageRunner(file_path=str(file_path), dialect=DIALECT, sql=file_path.read_text(
+                encoding="utf-8"), silent_mode=True)
+            source_tables = runner.source_tables
+            target_tables = runner.target_tables
         except Exception as e:
-            print(f"Skipping {file_path}: {e}\n", file=sys.stderr)
-            continue # Ignore files that cannot be parsed at all
+            pass
 
-        if not targets:
-            continue
+        assumed_schema = file_path.parent.parent.name
+        assumed_obj_name = file_path.stem
 
-        sources: set[str] = {normalize_name(s) for s in runner.source_tables}
-        for target_table in targets:
-            qualified_target = normalize_name(target_table, file_path.parent.parent.name)
+        if not runner or not target_tables:
+            print(f"Using basic parsing for: {assumed_schema}.{assumed_obj_name}")
+            sql = file_path.read_text(encoding="utf-8")
+            source_tables = [Table(name=n)
+                             for n in _find_qualified_names_in_sql(sql)
+                             if n.upper() in expected_names]
+            target_tables = [Table(name=assumed_obj_name)]
+
+        source_names = [normalize_name(s, assumed_schema)
+                        for s in source_tables]
+        target_names = [normalize_name(t, assumed_schema)
+                        for t in target_tables]
+
+        for qualified_target in target_names:
             path_by_obj[qualified_target] = file_path
-            dependencies_by_obj.setdefault(qualified_target, set()).update(sources)
+            dependencies_by_obj.setdefault(
+                qualified_target, set()).update(source_names)
 
     return path_by_obj, dependencies_by_obj
+
 
 def order_objects_topologically(
     objs: list[str],
@@ -61,6 +81,7 @@ def order_objects_topologically(
     except CycleError:
         return list(graph.keys())
 
+
 def get_dependency_ordered_objects(root_dir: Path) -> list[tuple[str, Path, list[str]]]:
     """
     Reads all .sql files in a directory
@@ -70,8 +91,36 @@ def get_dependency_ordered_objects(root_dir: Path) -> list[tuple[str, Path, list
     path_by_obj, dependencies_by_obj = extract_dependency_graph(root_dir)
     if not path_by_obj:
         return []
-    ordered_objects = order_objects_topologically(list(path_by_obj.keys()), dependencies_by_obj)
+    ordered_objects = order_objects_topologically(
+        list(path_by_obj.keys()), dependencies_by_obj)
     return [
-        (obj, path_by_obj[obj], sorted(dependencies_by_obj[obj], key=ordered_objects.index))
-                for obj in ordered_objects if obj in path_by_obj
-        ]
+        (obj, path_by_obj[obj], sorted(
+            dependencies_by_obj[obj], key=ordered_objects.index))
+        for obj in ordered_objects if obj in path_by_obj
+    ]
+
+
+def _find_qualified_names_in_sql(sql_text: str) -> set[str]:
+    """Lightweight regex-based scan to find qualified object names in SQL.
+
+    Returns normalized names in the form 'schema.object' or 'object'.
+    """
+    import re
+
+    # match 1-3 dot-separated identifiers, allowing double-quoted identifiers
+    ident = r'(?:[A-Za-z_][\w$]*|"[^"]+")'
+    pattern = re.compile(rf'\b{ident}(?:\s*\.\s*{ident}){{0,2}}\b')
+    names: set[str] = set()
+    for match in pattern.findall(sql_text):
+        # pattern.findall with this regex returns the whole match when there's
+        # one capture group; to be safe, re-run split
+        token = match if isinstance(match, str) else match[0]
+        parts = [p.strip().strip('"') for p in re.split(r'\s*\.\s*', token)]
+        if not parts:
+            continue
+        if len(parts) == 1:
+            names.add(f"{parts[0]}")
+        else:
+            # use last two parts as schema.table
+            names.add(f"{parts[-2]}.{parts[-1]}")
+    return names
