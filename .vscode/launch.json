@@ -1,0 +1,39 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "debugpy",
+      "request": "launch",
+      "name": "Debug folder-to-script",
+      "module": "cli.cli",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "args": [
+        "--scripts-dir",
+        "${input:scriptsDir}",
+        "folder-to-script",
+        "--output-file",
+        "${input:outputFile}",
+        "--db-name",
+        "${input:dbName}"
+      ]
+    }
+  ],
+  "inputs": [
+    {
+      "id": "scriptsDir",
+      "type": "promptString",
+      "description": "Path to the scripts directory passed to --scripts-dir (absolute or relative to working directory)."
+    },
+    {
+      "id": "outputFile",
+      "type": "promptString",
+      "description": "Path to write the deployment SQL output file (absolute or relative to working directory)."
+    },
+    {
+      "id": "dbName",
+      "type": "promptString",
+      "description": "Database name to pass to --db-name."
+    }
+  ]
+}
