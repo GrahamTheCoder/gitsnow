@@ -5,7 +5,7 @@ from . import db
 from .db_mock import get_mock_connection
 from .dependencies import get_dependency_ordered_objects
 from .format import format_sql
-from .diff import semantic_diff, get_objects_from_files, get_db_object_details
+from .diff import get_semantic_changed_files, semantic_diff, get_objects_from_files, get_db_object_details
 from .container import configure_services
 from sqlfluff.core import Linter, FluffConfig
 
@@ -77,31 +77,16 @@ def folder_to_script(ctx, db_name, output_file, test):
     conn = db.get_connection() if not test else get_mock_connection()
     conn.execute_string(f"USE DATABASE {db_name}")
     try:
-        ordered_files = [path for (_, path, _) in get_dependency_ordered_objects(scripts_path)]
-        click.echo(f"Found {len(ordered_files)} total objects. Checking for changes...")
+        ordered_obj_paths = [(obj_name, path) for (obj_name, path, _) in get_dependency_ordered_objects(scripts_path)]
+        click.echo(f"Found {len(ordered_obj_paths)} folder objects.")
 
-        # Get all object identifiers from files
-        file_objects = get_objects_from_files(db_name, ordered_files)
-
-        # Get all DDLs from the database in a single batch
-        db_ddls = db.get_all_ddls(conn, file_objects)
-
-        changed_files = []
-        for file_path in ordered_files:
-            # Re-parse to get the object name for the current file to use as a key
-            try:
-                obj_type, obj_name = get_db_object_details(file_path.read_text())
-                if len(obj_name.split('.')) == 2:
-                    obj_name = f'"{db_name}".{obj_name}'
-
-                db_sql = db_ddls.get(obj_name)
-                is_different, reason = semantic_diff(conn, file_path, db_sql=db_sql)
-
-                if is_different:
-                    changed_files.append(file_path)
-                    click.echo(f"  - CHANGE DETECTED ({reason}): {file_path.relative_to(scripts_path)}")
-            except (ValueError, IOError) as e:
-                click.echo(f"Warning: Could not process {file_path}: {e}")
+        schemas = db.get_all_schemas(conn, db_name)
+        db_objects = [obj for schema in schemas for obj in db.get_objects_in_schema(conn, db_name, schema)]
+        click.echo(f"Found {len(db_objects)} database objects.")
+                
+        changed_files = get_semantic_changed_files(ordered_obj_paths, db_objects, scripts_path)
+        # TODO: Bring back all semantically changed, and also recreate directly dependant objects
+        # e.g. If a dynamic table changes, the ones depending on it sometimes need recreating
 
         if not changed_files:
             click.echo("No changes detected. Database is in sync with scripts.")

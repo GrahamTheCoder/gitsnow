@@ -10,8 +10,13 @@ import re
 @dataclass
 class SnowflakeObject:
     name: str
+    schema: str
     type: str
     ddl: str
+
+    @property
+    def schema_qualified_name(self) -> str:
+        return f'{self.schema}.{self.name}'
 
 def get_connection() -> snowflake.connector.SnowflakeConnection:
     """Establishes a connection to Snowflake using user profile TOML file with JWT authentication."""
@@ -60,106 +65,108 @@ def get_all_schemas(conn: snowflake.connector.SnowflakeConnection, db_name: str)
 
 
 def get_objects_in_schema(conn: snowflake.connector.SnowflakeConnection, db_name: str, schema_name: str, cursor=None) -> list[SnowflakeObject]:
-    """Fetches all supported objects in a schema including functions, procedures, streams, and tasks."""
-    objects = []
+    """Fetches all supported objects in a schema including functions, procedures, streams, and tasks.
 
-    def _make_snowflake_object(cursor, kind_label: str, ddl_name: str, simple_name: str):
-        ddl = get_ddl(cursor, kind_label, ddl_name)
-        if not ddl:
-            return None
-        return SnowflakeObject(name=simple_name, type=kind_label, ddl=ddl)
+    This implementation first collects fully-qualified object names and their types, then
+    requests all DDLs in a single batched query via get_all_ddls, and finally constructs
+    SnowflakeObject instances from the batch result. This reduces round-trips for many objects.
+    """
 
-    def _get_objects_from_show_command(cursor, show_command: str, object_type: str, name_column_index: int = 1, args_column_index: int | None = None):
-        """Generic function to fetch objects using different SHOW commands."""
+    candidates: list[tuple[str, str, str]] = []  # list of (object_type, fully_qualified_name, simple_name)
+    results: list[SnowflakeObject] = []
+
+    def _collect_from_show_command(cur, show_command: str, object_type: str, name_column_index: int = 1, args_column_index: int | None = None):
         try:
-            cursor.execute(show_command)
-            rows = cursor.fetchall()
-            
+            cur.execute(show_command)
+            rows = cur.fetchall()
             for row in rows:
                 simple_name = row[name_column_index]
                 full_name = f'"{db_name}"."{schema_name}"."{simple_name}"'
-                
-                # Handle procedures with arguments
+
+                # Procedures sometimes need argument list appended
                 if object_type == "PROCEDURE" and args_column_index is not None and len(row) > args_column_index:
                     arg_types = row[args_column_index]
-                    ddl_name = f'{full_name}({arg_types})'
+                    if arg_types:
+                        ddl_name = f'{full_name}({arg_types})'
+                    else:
+                        ddl_name = full_name
                 else:
                     ddl_name = full_name
-                
-                obj = _make_snowflake_object(cursor, object_type, ddl_name, simple_name)
-                if obj:
-                    objects.append(obj)
+
+                candidates.append((object_type, ddl_name, simple_name))
         except Exception as e:
             print(f"[Warning] Failed to execute {show_command}: {e}")
 
-    def _get_objects(cursor: SnowflakeCursor):
+    def _gather_objects(cur: SnowflakeCursor):
         upper_db = db_name.upper()
         upper_schema = schema_name.upper()
         if upper_db in ("SNOWFLAKE",) or upper_schema in ("INFORMATION_SCHEMA",):
             return
 
-        # Get objects from SHOW OBJECTS (tables, views, etc.)
+        # SHOW OBJECTS to get common objects (tables, views, etc.)
         try:
-            cursor.execute(f'SHOW OBJECTS IN SCHEMA "{db_name}"."{schema_name}"')
-            rows = cursor.fetchall()
-
+            cur.execute(f'SHOW OBJECTS IN SCHEMA "{db_name}"."{schema_name}"')
+            rows = cur.fetchall()
             for row in rows:
                 simple_name = row[1]
                 kind = (row[4] or "").upper()
-                full_name = f'"{db_name}"."{schema_name}"."{simple_name}"'
-                
                 if kind == "PROCEDURE":
-                    # Handle procedures specially to get arguments
-                    _get_objects_from_show_command(
-                        cursor, 
+                    # fetch procedure variants (to get arg signatures)
+                    _collect_from_show_command(
+                        cur,
                         f'SHOW PROCEDURES LIKE \'{simple_name}\' IN SCHEMA "{db_name}"."{schema_name}"',
                         "PROCEDURE",
                         name_column_index=1,
-                        args_column_index=7
+                        args_column_index=7,
                     )
                 else:
-                    obj = _make_snowflake_object(cursor, kind, full_name, simple_name)
-                    if obj:
-                        objects.append(obj)
+                    full_name = f'"{db_name}"."{schema_name}"."{simple_name}"'
+                    candidates.append((kind, full_name, simple_name))
         except Exception as e:
             print(f"[Warning] Failed to get objects from SHOW OBJECTS: {e}")
 
-        # Get user functions
-        _get_objects_from_show_command(
-            cursor,
-            f'SHOW USER FUNCTIONS IN SCHEMA "{db_name}"."{schema_name}"',
-            "FUNCTION"
-        )
+        # Other object types
+        _collect_from_show_command(cur, f'SHOW USER FUNCTIONS IN SCHEMA "{db_name}"."{schema_name}"', "FUNCTION")
+        _collect_from_show_command(cur, f'SHOW USER PROCEDURES IN SCHEMA "{db_name}"."{schema_name}"', "PROCEDURE", args_column_index=7)
+        _collect_from_show_command(cur, f'SHOW STREAMS IN SCHEMA "{db_name}"."{schema_name}"', "STREAM")
+        _collect_from_show_command(cur, f'SHOW TASKS IN SCHEMA "{db_name}"."{schema_name}"', "TASK")
 
-        # Get user procedures (alternative method)
-        _get_objects_from_show_command(
-            cursor,
-            f'SHOW USER PROCEDURES IN SCHEMA "{db_name}"."{schema_name}"',
-            "PROCEDURE",
-            args_column_index=7
-        )
-
-        # Get streams
-        _get_objects_from_show_command(
-            cursor,
-            f'SHOW STREAMS IN SCHEMA "{db_name}"."{schema_name}"',
-            "STREAM"
-        )
-
-        # Get tasks
-        _get_objects_from_show_command(
-            cursor,
-            f'SHOW TASKS IN SCHEMA "{db_name}"."{schema_name}"',
-            "TASK"
-        )
-
+    # Use provided cursor or open one
     if cursor:
-        _get_objects(cursor)
+        _gather_objects(cursor)
     else:
-        with conn.cursor() as cursor:
-            _get_objects(cursor)
+        with conn.cursor() as cur:
+            _gather_objects(cur)
 
-    return objects
+    # If nothing to fetch, return empty list
+    if not candidates:
+        return []
+
+    # Build the list of (type, obj_name) for batch DDL fetch
+    to_fetch = [(obj_type, obj_name) for (obj_type, obj_name, _) in candidates]
+    ddl_map = get_all_ddls(conn, to_fetch)
+
+    # Construct SnowflakeObject instances from batch results
+    for obj_type, obj_name, simple_name in candidates:
+        # key format used by get_all_ddls is '{schema}.{simple_name}' (without quotes)
+        # extract schema and simple_name from obj_name
+        cleaned = obj_name.replace('"', '')
+        parts = cleaned.split('.')
+        # parts -> [db, schema, simple] or for procedures [db, schema, simple(args)]
+        if len(parts) < 3:
+            continue
+        schema_part = parts[1]
+        simple_part = parts[2]
+        key = f'{schema_part}.{simple_part}'
+
+        ddl = ddl_map.get(key)
+        if not ddl:
+            # skip objects with no accessible DDL
+            continue
+
+        results.append(SnowflakeObject(name=simple_name, schema=schema_part, type=obj_type, ddl=ddl))
+
+    return results
 
 def get_ddl(cursor: SnowflakeCursor, obj_type: str, fully_qualified_name: str) -> str | None:
     [db_name, schema_name, simple_name] = fully_qualified_name.replace('"', '').split('.')
@@ -203,10 +210,9 @@ def get_all_ddls(conn: snowflake.connector.SnowflakeConnection, objects: list[tu
             for row in rows:
                 obj_name, ddl = row
                 if ddl and not ddl.startswith("-- Failed to get DDL"):
-                    # Perform the same DDL fixup as the single get_ddl
                     [db_name, schema_name, simple_name] = obj_name.replace('"', '').split('.')
                     ddl = _fixup_ddl_and_type(cursor, db_name, schema_name, "UNKNOWN", ddl, simple_name)
-                    ddl_map[obj_name] = ddl
+                    ddl_map[f'{schema_name}.{simple_name}'] = ddl
             return ddl_map
         except snowflake.connector.errors.ProgrammingError as e:
             tb = traceback.format_exc()
