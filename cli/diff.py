@@ -1,9 +1,10 @@
 import click
 from pathlib import Path
+from itertools import chain
+
 from sqlfluff.core import Linter, FluffConfig
 
 from cli.db import SnowflakeObject
-
 from .format import get_formatter
 
 
@@ -100,45 +101,28 @@ def get_db_object_details(sql_text: str, dialect="snowflake"):
     parsed = linter.parse_string(sql_text)
 
     if parsed.tree:
-        for statement in parsed.tree.recursive_crawl('statement'):
-            # Check for table creation
-            create_table = next(statement.recursive_crawl(
-                'create_table_statement'), None)
-            if create_table:
-                obj_ref = next(create_table.recursive_crawl(
-                    'table_reference'), None)
-                if obj_ref:
-                    return 'TABLE', obj_ref.raw
+        create_statements = (
+            # Fall back on unparsable segment if no valid create statement found
+            s for s in chain(parsed.tree.recursive_crawl('statement'), parsed.tree.recursive_crawl("unparsable"))
+            if _is_create_statement(s)
+        )
 
-            # Check for view creation
-            create_view = next(statement.recursive_crawl(
-                'create_view_statement'), None)
-            if create_view:
-                obj_ref = next(create_view.recursive_crawl(
-                    'table_reference'), None)
-                if obj_ref:
-                    return 'VIEW', obj_ref.raw
-
-            # Check for procedure creation
-            create_proc = next(statement.recursive_crawl(
-                'create_procedure_statement'), None)
-            if create_proc:
-                obj_ref = next(create_proc.recursive_crawl(
-                    'function_name'), None)
-                if obj_ref:
-                    return 'PROCEDURE', obj_ref.raw
-
-            # Check for function creation
-            create_func = next(statement.recursive_crawl(
-                'create_function_statement'), None)
-            if create_func:
-                obj_ref = next(create_func.recursive_crawl(
-                    'function_name'), None)
-                if obj_ref:
-                    return 'FUNCTION', obj_ref.raw
+        create_statement = next(create_statements, None)
+        segments = create_statement.recursive_crawl_all() if create_statement else []
+        prev_keyword = ''
+        for segment in segments:
+            # When the parsing fails everything becomes a "word"
+            if (segment.is_type('keyword') or segment.is_type('word')) and segment.raw.upper() in ["TABLE", "VIEW", "PROCEDURE", "FUNCTION", "STREAM", "TASK"]:
+                prev_keyword = segment.raw
+            elif prev_keyword and not segment.is_whitespace and not segment.is_comment:
+                return (prev_keyword.upper(), segment.raw.upper())
 
     raise ValueError(
         "Could not find a supported CREATE statement in the file.")
+
+def _is_create_statement(s):
+    first_keyword = next(s.recursive_crawl('keyword'), s.recursive_crawl('word', None))
+    return first_keyword and first_keyword.raw.upper() == 'CREATE'
 
 
 def get_semantic_changed_files(ordered_files: list[tuple[str, Path]], db_objects: list[SnowflakeObject], scripts_path: Path) -> list[Path]:
