@@ -3,6 +3,7 @@ from pathlib import Path
 from itertools import chain
 
 from sqlfluff.core import Linter, FluffConfig
+from sqlfluff.core.parser import BaseSegment
 
 from cli.db import SnowflakeObject
 from .format import get_formatter
@@ -120,8 +121,8 @@ def get_db_object_details(sql_text: str, dialect="snowflake"):
     raise ValueError(
         "Could not find a supported CREATE statement in the file.")
 
-def _is_create_statement(s):
-    first_keyword = next(s.recursive_crawl('keyword'), s.recursive_crawl('word', None))
+def _is_create_statement(s: BaseSegment):
+    first_keyword = next(chain(s.recursive_crawl('keyword'), s.recursive_crawl('word')), None)
     return first_keyword and first_keyword.raw.upper() == 'CREATE'
 
 
