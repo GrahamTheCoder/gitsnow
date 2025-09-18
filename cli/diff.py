@@ -138,7 +138,7 @@ def get_semantic_changed_files(ordered_files: list[tuple[str, Path]], db_objects
             if is_different:
                 changed_files.append(file_path)
                 click.echo(
-                    f"  - CHANGE DETECTED ({reason}): {file_path.relative_to(scripts_path)}")
+                    f"  - Change detected ({reason}): {file_path.relative_to(scripts_path)}")
         except (ValueError, IOError) as e:
             click.echo(f"Warning: Could not process {file_path}: {e}")
     return changed_files
@@ -155,7 +155,7 @@ def semantic_diff(file_sql: str, db_sql: str | None):
 
         # If db_sql is not provided, fetch it from the database
         if db_sql is None:
-            return True, f"{obj_type} '{obj_name}' does not exist in DB"
+            return True, f"{obj_type.lower()} '{obj_name.lower()}' does not exist in DB"
 
         # Semantic comparison ignoring comments and whitespace
         if not are_semantically_equal(db_sql, file_sql):
