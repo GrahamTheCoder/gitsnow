@@ -1,6 +1,7 @@
 # gitsnow
 
 Easily sync objects from git to snowflake (deployment), and from snowflake to git (drift detection and reintegration).
+This tool does not preserve case, and hence will not work correctly when quoted_identifiers_ignore_case is set to false.
 
 ## Usage
 

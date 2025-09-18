@@ -130,14 +130,20 @@ def folder_to_script(ctx, db_name, output_file, test):
 
 @cli.command(name='show-dependencies')
 @click.option('--ignore-prefixes', default="", show_default=True, help="Comma-separated list of schema prefixes to ignore for no-dependencies output.")
+@click.option('--upper-case', default="False", show_default=False, help="Whether to show object names in upper case.")
 @click.pass_context
-def show_dependencies(ctx, ignore_prefixes):
+def show_dependencies(ctx, ignore_prefixes, upper_case):
     """
     Output the dependency graph in plain text.
     """
     scripts_dir = ctx.obj['scripts_dir']
     scripts_path = Path(scripts_dir)
     dependency_ordered_objects = get_dependency_ordered_objects(scripts_path)
+    if not upper_case:
+        dependency_ordered_objects = [
+            (obj.lower(), path, [dep.lower() for dep in dependencies])
+            for obj, path, dependencies in dependency_ordered_objects
+        ]
 
     for obj, _, dependencies in dependency_ordered_objects:
         if dependencies:

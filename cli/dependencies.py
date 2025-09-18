@@ -1,11 +1,23 @@
-import sys
+from dataclasses import dataclass
+import logging
+import re
 
 from graphlib import TopologicalSorter, CycleError
 from pathlib import Path
+from sqllineage.exceptions import SQLLineageException
 from sqllineage.runner import LineageRunner
-from sqllineage.core.models import Table
 
 DIALECT = "snowflake"
+
+
+@dataclass(frozen=True)
+class SnowflakeName:
+    name: str
+    schema: str
+
+    @property
+    def schema_qualified_name(self) -> str:
+        return f'{self.schema}.{self.name}'
 
 
 def extract_dependency_graph(root_dir: Path) -> tuple[dict[str, Path], dict[str, set[str]]]:
@@ -19,48 +31,53 @@ def extract_dependency_graph(root_dir: Path) -> tuple[dict[str, Path], dict[str,
     if not sql_files:
         return {}, {}
 
-    def normalize_name(table: Table, assumed_schema_name: str = '<default>') -> str:
-        # Keep same normalization strategy as before
-        schema_name = table.schema.raw_name if table.schema else assumed_schema_name
-        return str(schema_name + "." + table.raw_name).lower()
-
     path_by_obj: dict[str, Path] = {}
     dependencies_by_obj: dict[str, set[str]] = {}
 
-    expected_names = set((p.parent.parent.name + "." + p.stem).upper() for p in sql_files)
+    expected_names = set((p.parent.parent.name + "." + p.stem).upper()
+                         for p in sql_files)
 
     for file_path in sql_files:
         runner: LineageRunner | None = None
-        target_tables: list[Table] = []
-        source_tables: list[Table] = []
+        target_objects: list[SnowflakeName] = []
+        source_objects: list[SnowflakeName] = []
         try:
-            runner = LineageRunner(file_path=str(file_path), dialect=DIALECT, sql=file_path.read_text(
-                encoding="utf-8"), silent_mode=True)
-            source_tables = runner.source_tables
-            target_tables = runner.target_tables
-        except Exception as e:
-            pass
+            file_sql = file_path.read_text(encoding="utf-8")
+            runner = LineageRunner(file_path=str(file_path), dialect=DIALECT, sql=file_sql, silent_mode=True)
+            source_objects = [
+                SnowflakeName(name=t.raw_name.upper(), schema=t.schema.raw_name.upper())
+                for t in runner.source_tables
+            ]
+            target_objects = [
+                SnowflakeName(name=t.raw_name.upper(), schema=t.schema.raw_name.upper())
+                for t in runner.target_tables
+            ]
+        except SQLLineageException as e:
+            logging.debug("LineageRunner failed for %s: %s", file_path, e)
 
         assumed_schema = file_path.parent.parent.name
         assumed_obj_name = file_path.stem
 
-        if not runner or not target_tables:
-            print(f"Using basic parsing for: {assumed_schema}.{assumed_obj_name}")
+        if not runner or not target_objects:
+            print(
+                f"Using basic parsing for: {assumed_schema}.{assumed_obj_name}")
             sql = file_path.read_text(encoding="utf-8")
-            source_tables = [Table(name=n)
-                             for n in _find_qualified_names_in_sql(sql)
-                             if n.upper() in expected_names]
-            target_tables = [Table(name=assumed_obj_name)]
+            target_name = SnowflakeName(name=assumed_obj_name.upper(), schema=assumed_schema.upper())
+            target_objects = [target_name]
+            possible_names = _find_possible_names_in_sql(sql, assumed_schema)
+            source_objects = [
+                n for n in possible_names
+                if n.schema_qualified_name in expected_names
+            ]
 
-        source_names = [normalize_name(s, assumed_schema)
-                        for s in source_tables]
-        target_names = [normalize_name(t, assumed_schema)
-                        for t in target_tables]
+        target_names = [t.schema_qualified_name for t in target_objects]
+        source_names = [
+            s.schema_qualified_name for s in source_objects if s not in target_objects
+        ]
 
         for qualified_target in target_names:
             path_by_obj[qualified_target] = file_path
-            dependencies_by_obj.setdefault(
-                qualified_target, set()).update(source_names)
+            dependencies_by_obj.setdefault(qualified_target, set()).update(source_names)
 
     return path_by_obj, dependencies_by_obj
 
@@ -100,17 +117,13 @@ def get_dependency_ordered_objects(root_dir: Path) -> list[tuple[str, Path, list
     ]
 
 
-def _find_qualified_names_in_sql(sql_text: str) -> set[str]:
-    """Lightweight regex-based scan to find qualified object names in SQL.
-
-    Returns normalized names in the form 'schema.object' or 'object'.
-    """
-    import re
+def _find_possible_names_in_sql(sql_text: str, assumed_schema_name: str) -> set[SnowflakeName]:
+    """Lightweight regex-based scan to find qualified object names in SQL."""
 
     # match 1-3 dot-separated identifiers, allowing double-quoted identifiers
     ident = r'(?:[A-Za-z_][\w$]*|"[^"]+")'
     pattern = re.compile(rf'\b{ident}(?:\s*\.\s*{ident}){{0,2}}\b')
-    names: set[str] = set()
+    names: set[SnowflakeName] = set()
     for match in pattern.findall(sql_text):
         # pattern.findall with this regex returns the whole match when there's
         # one capture group; to be safe, re-run split
@@ -119,8 +132,8 @@ def _find_qualified_names_in_sql(sql_text: str) -> set[str]:
         if not parts:
             continue
         if len(parts) == 1:
-            names.add(f"{parts[0]}")
+            names.add(SnowflakeName(parts[0].upper(), assumed_schema_name.upper()))
         else:
             # use last two parts as schema.table
-            names.add(f"{parts[-2]}.{parts[-1]}")
+            names.add(SnowflakeName(parts[-1].upper(), parts[-2].upper()))
     return names
