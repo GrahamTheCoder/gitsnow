@@ -1,3 +1,9 @@
 {
-    "python-envs.pythonProjects": []
+    "python-envs.pythonProjects": [],
+    "pylint.args": [
+        "--max-line-length=120"
+    ],
+    "autopep8.args": [
+        "--max-line-length=120"
+    ]
 }
