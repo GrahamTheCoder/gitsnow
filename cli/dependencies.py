@@ -99,22 +99,44 @@ def order_objects_topologically(
         return list(graph.keys())
 
 
+def get_all_dependency_information(root_dir: Path):
+    """
+    Reads all .sql files in a directory and returns dependency information.
+    Returns a tuple containing:
+    - A list in dependency order of tuples (qualified object name, file path, ordered dependencies).
+    - A reverse dependency graph (dependents_by_obj).
+    """
+    path_by_obj, dependencies_by_obj = extract_dependency_graph(root_dir)
+    if not path_by_obj:
+        return [], {}
+
+    ordered_obj_names = order_objects_topologically(
+        list(path_by_obj.keys()), dependencies_by_obj)
+
+    order_map = {name: i for i, name in enumerate(ordered_obj_names)}
+
+    ordered_objects = [
+        (obj, path_by_obj[obj], sorted(
+            dependencies_by_obj.get(obj, []), key=lambda x: order_map.get(x, len(order_map))))
+        for obj in ordered_obj_names if obj in path_by_obj
+    ]
+
+    dependents_by_obj: dict[str, set[str]] = {}
+    for obj, dependencies in dependencies_by_obj.items():
+        for dep in dependencies:
+            dependents_by_obj.setdefault(dep, set()).add(obj)
+
+    return ordered_objects, dependents_by_obj
+
+
 def get_dependency_ordered_objects(root_dir: Path) -> list[tuple[str, Path, list[str]]]:
     """
     Reads all .sql files in a directory
     Returns a list in dependency order of tuples.
     The tuple contains the qualified object name, the file path, and the ordered list of dependencies
     """
-    path_by_obj, dependencies_by_obj = extract_dependency_graph(root_dir)
-    if not path_by_obj:
-        return []
-    ordered_objects = order_objects_topologically(
-        list(path_by_obj.keys()), dependencies_by_obj)
-    return [
-        (obj, path_by_obj[obj], sorted(
-            dependencies_by_obj[obj], key=ordered_objects.index))
-        for obj in ordered_objects if obj in path_by_obj
-    ]
+    ordered_objects, _ = get_all_dependency_information(root_dir)
+    return ordered_objects
 
 
 def _find_possible_names_in_sql(sql_text: str, assumed_schema_name: str) -> set[SnowflakeName]:

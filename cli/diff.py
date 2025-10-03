@@ -103,31 +103,45 @@ def get_db_object_details(sql_text: str, dialect="snowflake"):
 
     if parsed.tree:
         create_statements = (
-            # Fall back on unparsable segment if no valid create statement found
             s for s in chain(parsed.tree.recursive_crawl('statement'), parsed.tree.recursive_crawl("unparsable"))
             if _is_create_statement(s)
         )
 
         create_statement = next(create_statements, None)
-        segments = create_statement.recursive_crawl_all() if create_statement else []
+        if not create_statement:
+            raise ValueError("Could not find a CREATE statement in the file.")
+
+        segments = list(create_statement.recursive_crawl_all())
+
+        # Check for 'DYNAMIC TABLE'
+        for i, segment in enumerate(segments):
+            if segment.raw.upper() == 'DYNAMIC' and i + 1 < len(segments) and segments[i+1].raw.upper() == 'TABLE':
+                # Find the object name following 'DYNAMIC TABLE'
+                for next_segment in segments[i+2:]:
+                    if not next_segment.is_whitespace and not next_segment.is_comment:
+                        return ("DYNAMIC TABLE", next_segment.raw.upper())
+
+        # Fallback for other object types
         prev_keyword = ''
         for segment in segments:
-            # When the parsing fails everything becomes a "word"
             if (segment.is_type('keyword') or segment.is_type('word')) and segment.raw.upper() in ["TABLE", "VIEW", "PROCEDURE", "FUNCTION", "STREAM", "TASK"]:
                 prev_keyword = segment.raw
             elif prev_keyword and not segment.is_whitespace and not segment.is_comment:
                 return (prev_keyword.upper(), segment.raw.upper())
 
-    raise ValueError(
-        "Could not find a supported CREATE statement in the file.")
+    raise ValueError("Could not find a supported CREATE statement in the file.")
 
 def _is_create_statement(s: BaseSegment):
     first_keyword = next(chain(s.recursive_crawl('keyword'), s.recursive_crawl('word')), None)
     return first_keyword and first_keyword.raw.upper() == 'CREATE'
 
 
-def get_semantic_changed_files(ordered_files: list[tuple[str, Path]], db_objects: list[SnowflakeObject], scripts_path: Path) -> list[Path]:
-    changed_files: list[Path] = []
+def get_semantic_changed_files(ordered_files: list[tuple[str, Path]], db_objects: list[SnowflakeObject], scripts_path: Path) -> list[dict]:
+    """
+    Compares files against DB objects and returns a list of changes.
+    Each change is a dictionary with obj_name, path, file_sql, db_sql, and reason.
+    """
+    changed_files: list[dict] = []
     db_ddls = {obj.schema_qualified_name.upper(): obj.ddl for obj in db_objects}
     for (obj_name, file_path) in ordered_files:
         try:
@@ -136,7 +150,13 @@ def get_semantic_changed_files(ordered_files: list[tuple[str, Path]], db_objects
             is_different, reason = semantic_diff(file_sql, db_sql)
 
             if is_different:
-                changed_files.append(file_path)
+                changed_files.append({
+                    'obj_name': obj_name,
+                    'path': file_path,
+                    'file_sql': file_sql,
+                    'db_sql': db_sql,
+                    'reason': reason
+                })
                 click.echo(
                     f"  - Change detected ({reason}): {file_path.relative_to(scripts_path)}")
         except (ValueError, IOError) as e:
