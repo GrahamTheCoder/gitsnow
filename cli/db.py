@@ -172,25 +172,6 @@ def get_objects_in_schema(conn: snowflake.connector.SnowflakeConnection, db_name
 
     return results
 
-def get_ddl(cursor: SnowflakeCursor, obj_type: str, fully_qualified_name: str) -> str | None:
-    [db_name, schema_name, simple_name] = fully_qualified_name.replace('"', '').split('.')
-    ddl = get_ddl_raw(cursor, obj_type, fully_qualified_name)
-    if ddl.startswith("-- Failed to get DDL"):
-        print(f"[DDL Permission] Cannot get DDL for {obj_type.lower()}: {fully_qualified_name}\n{ddl}")
-        return None
-    ddl = _fixup_ddl_and_type(cursor, db_name, schema_name, obj_type, ddl, simple_name)
-    return ddl
-
-def get_ddl_raw(cursor: SnowflakeCursor, obj_type: str, obj_name: str) -> str:
-    """Generic function to get DDL for any object."""
-    try:
-        cursor.execute(f"SELECT GET_DDL('{obj_type}', '{obj_name}', TRUE)")
-        result = cursor.fetchone()
-        return result[0] if result else f"-- DDL for {obj_name} could not be retrieved."
-    except snowflake.connector.errors.ProgrammingError as e:
-        tb = traceback.format_exc()
-        return f"-- Failed to get DDL for {obj_name}: {e}\nStack trace:\n{tb}"
-
 def get_all_ddls(conn: snowflake.connector.SnowflakeConnection, objects: list[tuple[str, str]]) -> dict[str, str]:
     """
     Fetches DDL for a list of objects in a single query.
