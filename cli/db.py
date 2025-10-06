@@ -18,12 +18,16 @@ class SnowflakeObject:
     def schema_qualified_name(self) -> str:
         return f'{self.schema}.{self.name}'
 
-def get_connection() -> snowflake.connector.SnowflakeConnection:
+def get_connection(db_name: str) -> snowflake.connector.SnowflakeConnection:
     """Establishes a connection to Snowflake using user profile TOML file with JWT authentication."""
     try:
         toml_path = os.path.expanduser("~/.snowflake/connections.toml")
         config = toml.load(toml_path)
-        _, conn_info = list(config.items())[0]
+        # Find the connection config where the key ends with 'gitsnow'
+        connection_name = f"{db_name}__GITSNOW".upper()
+        conn_info = config.get(connection_name)
+        if conn_info is None:
+            raise KeyError(f"Could not find a connection profile in ~/.snowflake/connections.toml with the name '{connection_name}'")
 
         # Load private key
         with open(conn_info["private_key_path"], "rb") as key_file:

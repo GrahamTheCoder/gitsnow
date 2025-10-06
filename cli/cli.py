@@ -39,7 +39,7 @@ def db_to_folder(ctx, db_name, schemas, test):
     output_path = Path(scripts_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    conn = db.get_connection() if not test else get_mock_connection()
+    conn = db.get_connection(db_name) if not test else get_mock_connection()
 
     try:
         if not schemas:
@@ -74,7 +74,7 @@ def folder_to_script(ctx, db_name, output_file, test):
     scripts_dir = ctx.obj['scripts_dir']
     scripts_path = Path(scripts_dir)
 
-    conn = db.get_connection() if not test else get_mock_connection()
+    conn = db.get_connection(db_name) if not test else get_mock_connection()
     conn.execute_string(f"USE DATABASE {db_name}")
     try:
         ordered_obj_paths = [(obj_name, path) for (obj_name, path, _) in get_dependency_ordered_objects(scripts_path)]
