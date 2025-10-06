@@ -18,6 +18,13 @@ class SnowflakeObject:
     def schema_qualified_name(self) -> str:
         return f'{self.schema}.{self.name}'
 
+@dataclass
+class SnowflakeIdentifier:
+    object_type: str
+    fully_qualified_name: str
+    simple_name: str
+    args: str | None = None
+
 def get_connection(db_name: str) -> snowflake.connector.SnowflakeConnection:
     """Establishes a connection to Snowflake using user profile TOML file with JWT authentication."""
     try:
@@ -67,6 +74,25 @@ def get_all_schemas(conn: snowflake.connector.SnowflakeConnection, db_name: str)
         return [row[1] for row in cursor if row[1] not in ('INFORMATION_SCHEMA', 'PUBLIC')]
 
 
+def _parse_function_signatures(function_name: str, raw_args: str) -> list[str | None]:
+    """
+    Parses function/procedure signatures, handling overloaded functions.
+    
+    Input example: "AI_THROW_IF_ERROR(OBJECT) RETURN VARIANT, AI_THROW_IF_ERROR(OBJECT(placeholder ANY)) RETURN VARIANT"
+    Output: ["OBJECT", "OBJECT(placeholder ANY)"]
+    
+    Returns a list of argument type strings (without RETURN clause).
+    """
+    if not raw_args:
+        return [None]
+    
+    # Match function_name followed by (args) and optional RETURN clause
+    # Pattern: FUNC_NAME(capture_args) optionally followed by RETURN ...
+    pattern = rf'{re.escape(function_name)}\s*\((.*?)\)(?:\s+RETURN\s+[^,]*)?'
+    matches = re.findall(pattern, raw_args, flags=re.IGNORECASE)
+    
+    return matches if matches else [None]
+
 
 def get_objects_in_schema(conn: snowflake.connector.SnowflakeConnection, db_name: str, schema_name: str, cursor=None) -> list[SnowflakeObject]:
     """Fetches all supported objects in a schema including functions, procedures, streams, and tasks.
@@ -76,7 +102,7 @@ def get_objects_in_schema(conn: snowflake.connector.SnowflakeConnection, db_name
     SnowflakeObject instances from the batch result. This reduces round-trips for many objects.
     """
 
-    candidates: list[tuple[str, str, str]] = []  # list of (object_type, fully_qualified_name, simple_name)
+    candidates: list[SnowflakeIdentifier] = []
     results: list[SnowflakeObject] = []
 
     def _collect_from_show_command(cur, show_command: str, object_type: str, name_column_index: int = 1, args_column_index: int | None = None):
@@ -87,17 +113,19 @@ def get_objects_in_schema(conn: snowflake.connector.SnowflakeConnection, db_name
                 simple_name = row[name_column_index]
                 full_name = f'"{db_name}"."{schema_name}"."{simple_name}"'
 
-                # Procedures sometimes need argument list appended
-                if object_type == "PROCEDURE" and args_column_index is not None and len(row) > args_column_index:
-                    arg_types = row[args_column_index]
-                    if arg_types:
-                        ddl_name = f'{full_name}({arg_types})'
+                # Extract argument types if available
+                if args_column_index is not None and len(row) > args_column_index:
+                    raw_args = row[args_column_index]
+                    if raw_args:
+                        # Parse multiple overloaded signatures
+                        # e.g., "AI_THROW_IF_ERROR(OBJECT) RETURN VARIANT, AI_THROW_IF_ERROR(OBJECT(placeholder ANY)) RETURN VARIANT"
+                        signatures = _parse_function_signatures(simple_name, raw_args)
+                        for sig in signatures:
+                            candidates.append(SnowflakeIdentifier(object_type, full_name, simple_name, sig))
                     else:
-                        ddl_name = full_name
+                        candidates.append(SnowflakeIdentifier(object_type, full_name, simple_name, None))
                 else:
-                    ddl_name = full_name
-
-                candidates.append((object_type, ddl_name, simple_name))
+                    candidates.append(SnowflakeIdentifier(object_type, full_name, simple_name, None))
         except Exception as e:
             print(f"[Warning] Failed to execute {show_command}: {e}")
 
@@ -114,24 +142,14 @@ def get_objects_in_schema(conn: snowflake.connector.SnowflakeConnection, db_name
             for row in rows:
                 simple_name = row[1]
                 kind = (row[4] or "").upper()
-                if kind == "PROCEDURE":
-                    # fetch procedure variants (to get arg signatures)
-                    _collect_from_show_command(
-                        cur,
-                        f'SHOW PROCEDURES LIKE \'{simple_name}\' IN SCHEMA "{db_name}"."{schema_name}"',
-                        "PROCEDURE",
-                        name_column_index=1,
-                        args_column_index=7,
-                    )
-                else:
-                    full_name = f'"{db_name}"."{schema_name}"."{simple_name}"'
-                    candidates.append((kind, full_name, simple_name))
+                full_name = f'"{db_name}"."{schema_name}"."{simple_name}"'
+                candidates.append(SnowflakeIdentifier(kind, full_name, simple_name, None))
         except Exception as e:
             print(f"[Warning] Failed to get objects from SHOW OBJECTS: {e}")
 
         # Other object types
-        _collect_from_show_command(cur, f'SHOW USER FUNCTIONS IN SCHEMA "{db_name}"."{schema_name}"', "FUNCTION")
-        _collect_from_show_command(cur, f'SHOW USER PROCEDURES IN SCHEMA "{db_name}"."{schema_name}"', "PROCEDURE", args_column_index=7)
+        _collect_from_show_command(cur, f'SHOW USER FUNCTIONS IN SCHEMA "{db_name}"."{schema_name}"', "FUNCTION", args_column_index=8)
+        _collect_from_show_command(cur, f'SHOW USER PROCEDURES IN SCHEMA "{db_name}"."{schema_name}"', "PROCEDURE", args_column_index=8)
         _collect_from_show_command(cur, f'SHOW STREAMS IN SCHEMA "{db_name}"."{schema_name}"', "STREAM")
         _collect_from_show_command(cur, f'SHOW TASKS IN SCHEMA "{db_name}"."{schema_name}"', "TASK")
 
@@ -146,17 +164,16 @@ def get_objects_in_schema(conn: snowflake.connector.SnowflakeConnection, db_name
     if not candidates:
         return []
 
-    # Build the list of (type, obj_name) for batch DDL fetch
-    to_fetch = [(obj_type, obj_name) for (obj_type, obj_name, _) in candidates]
-    ddl_map = get_all_ddls(conn, to_fetch)
+    # Fetch all DDLs using the identifiers
+    ddl_map = get_all_ddls(conn, candidates)
 
     # Construct SnowflakeObject instances from batch results
-    for obj_type, obj_name, simple_name in candidates:
+    for candidate in candidates:
         # key format used by get_all_ddls is '{schema}.{simple_name}' (without quotes)
         # extract schema and simple_name from obj_name
-        cleaned = obj_name.replace('"', '')
+        cleaned = candidate.fully_qualified_name.replace('"', '')
         parts = cleaned.split('.')
-        # parts -> [db, schema, simple] or for procedures [db, schema, simple(args)]
+        # parts -> [db, schema, simple]
         if len(parts) < 3:
             continue
         schema_part = parts[1]
@@ -168,11 +185,11 @@ def get_objects_in_schema(conn: snowflake.connector.SnowflakeConnection, db_name
             # skip objects with no accessible DDL
             continue
 
-        results.append(SnowflakeObject(name=simple_name, schema=schema_part, type=obj_type, ddl=ddl))
+        results.append(SnowflakeObject(name=candidate.simple_name, schema=schema_part, type=candidate.object_type, ddl=ddl))
 
     return results
 
-def get_all_ddls(conn: snowflake.connector.SnowflakeConnection, objects: list[tuple[str, str]]) -> dict[str, str]:
+def get_all_ddls(conn: snowflake.connector.SnowflakeConnection, objects: list[SnowflakeIdentifier]) -> dict[str, str]:
     """
     Fetches DDL for a list of objects in a single query.
     """
@@ -181,8 +198,13 @@ def get_all_ddls(conn: snowflake.connector.SnowflakeConnection, objects: list[tu
 
     # Build a UNION ALL query to fetch all DDLs at once
     union_queries = []
-    for obj_type, obj_name in objects:
-        union_queries.append(f"SELECT '{obj_name}' as obj_name, GET_DDL('{obj_type}', '{obj_name}', TRUE) as ddl")
+    for obj in objects:
+        # For FUNCTION and PROCEDURE, append argument types if present
+        if obj.object_type in ("FUNCTION", "PROCEDURE") and obj.args is not None:
+            ddl_name = f'{obj.fully_qualified_name}({obj.args})'
+        else:
+            ddl_name = obj.fully_qualified_name
+        union_queries.append(f"SELECT '{ddl_name}' as obj_name, GET_DDL('{obj.object_type}', '{ddl_name}', TRUE) as ddl")
 
     full_query = "\nUNION ALL\n".join(union_queries)
 
