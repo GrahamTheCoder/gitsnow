@@ -113,7 +113,7 @@ def get_db_object_details(sql_text: str, dialect="snowflake"):
         prev_keyword = ''
         for segment in segments:
             # When the parsing fails everything becomes a "word"
-            if (segment.is_type('keyword') or segment.is_type('word')) and segment.raw.upper() in ["TABLE", "VIEW", "PROCEDURE", "FUNCTION", "STREAM", "TASK"]:
+            if (segment.is_type('keyword') or segment.is_type('word')) and segment.raw.upper() in ["TABLE", "VIEW", "PROCEDURE", "FUNCTION", "STREAM", "TASK", "POLICY"]:
                 prev_keyword = segment.raw
             elif prev_keyword and not segment.is_whitespace and not segment.is_comment:
                 return (prev_keyword.upper(), segment.raw.upper())
