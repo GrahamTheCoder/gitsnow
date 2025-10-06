@@ -49,13 +49,33 @@ def db_to_folder(ctx, db_name, schemas, test):
 
         for schema_name in schemas:
             objects = db.get_objects_in_schema(conn, db_name, schema_name)
+            
+            # Group objects by (type, name) to handle overloaded functions/procedures
+            from collections import defaultdict
+            grouped_objects = defaultdict(list)
             for obj in objects:
-                obj_type_dir = output_path / schema_name.lower() / (obj.type.lower() + 's')
+                key = (obj.type.lower(), obj.name.lower())
+                grouped_objects[key].append(obj)
+            
+            # Write each group to a single file
+            for (obj_type, obj_name), obj_group in grouped_objects.items():
+                obj_type_dir = output_path / schema_name.lower() / (obj_type + 's')
                 obj_type_dir.mkdir(parents=True, exist_ok=True)
-                formatted_ddl = format_sql(obj.ddl)
-                file_path = obj_type_dir / f"{obj.name.lower()}.sql"
-                file_path.write_text(formatted_ddl)
-                click.echo(f"  - Wrote {file_path}")
+                
+                # Sort objects by their args for consistency (None/empty args first)
+                obj_group.sort(key=lambda o: (o.ddl if hasattr(o, 'ddl') else '', ''))
+                
+                # Format and combine DDLs with triple newline separator
+                formatted_ddls = [format_sql(obj.ddl) for obj in obj_group]
+                combined_ddl = '\n\n\n'.join(formatted_ddls)
+                
+                file_path = obj_type_dir / f"{obj_name}.sql"
+                file_path.write_text(combined_ddl)
+                
+                if len(obj_group) > 1:
+                    click.echo(f"  - Wrote {file_path} ({len(obj_group)} overloads)")
+                else:
+                    click.echo(f"  - Wrote {file_path}")
 
         click.echo("Export complete.")
     except Exception as e:
