@@ -3,7 +3,7 @@ from pathlib import Path
 
 from . import db
 from .db_mock import get_mock_connection
-from .dependencies import get_dependency_ordered_objects, build_debug_trace_plan
+from .dependencies import get_dependency_ordered_objects, build_debug_trace_plan, parse_debug_query
 from .format import format_sql
 from .diff import get_semantic_changed_files, semantic_diff, get_objects_from_files, get_db_object_details
 from .container import configure_services
@@ -196,26 +196,68 @@ def show_dependencies(ctx, ignore_prefixes, upper_case):
 
 
 @cli.command(name='trace-column-lineage')
-@click.option('--target-table', required=True, help="Target table (schema.table).")
-@click.option('--target-column', required=True, help="Target column to trace.")
-@click.option('--filter-column', required=True, help="Filter column in target table.")
-@click.option('--filter-value', required=True, help="Filter value to use in suggested queries.")
+@click.option('--target-table', required=False, help="Target table (schema.table).")
+@click.option('--target-column', required=False, help="Target column to trace.")
+@click.option('--filter-column', required=False, help="Filter column in target table.")
+@click.option('--filter-value', required=False, help="Filter value to use in suggested queries.")
+@click.option('--query', required=False, help="Inline SQL SELECT query to parse for target table and filters.")
+@click.option('--query-file', required=False, type=click.Path(exists=True, dir_okay=False), help="Path to a SQL file containing the SELECT query.")
 @click.option('--max-depth', default=10, show_default=True, type=int, help="Maximum lineage depth to traverse.")
 @click.pass_context
-def trace_column_lineage(ctx, target_table, target_column, filter_column, filter_value, max_depth):
+def trace_column_lineage(ctx, target_table, target_column, filter_column, filter_value, query, query_file, max_depth):
     """
     Trace column lineage and output a debug query plan.
     """
     scripts_dir = ctx.obj['scripts_dir']
     scripts_path = Path(scripts_dir)
 
+    if query and query_file:
+        raise click.ClickException("Provide either --query or --query-file, not both.")
+
+    filter_predicates = None
+
+    if query_file:
+        query = Path(query_file).read_text(encoding="utf-8")
+
+    if query:
+        parsed_table, parsed_target_col, predicates = parse_debug_query(query)
+
+        if not target_table:
+            target_table = parsed_table
+        if not target_column:
+            if parsed_target_col:
+                target_column = parsed_target_col
+            elif predicates:
+                target_column = predicates[0][0]
+                click.echo("-- No target column found in SELECT; using first filter column.")
+            else:
+                raise click.ClickException("Target column is required when the SELECT list is ambiguous.")
+
+        if predicates:
+            filter_predicates = predicates
+
+    if not target_table:
+        raise click.ClickException("Target table is required.")
+    if not target_column:
+        raise click.ClickException("Target column is required.")
+
+    if filter_predicates is None:
+        if not filter_column or not filter_value:
+            raise click.ClickException("Filter column and value are required if no predicates are parsed from query.")
+        filter_predicates = [(filter_column, filter_value)]
+    else:
+        if filter_column and filter_value:
+            if all(filter_column.upper() != col.upper() for col, _ in filter_predicates):
+                filter_predicates.append((filter_column, filter_value))
+
     lines = build_debug_trace_plan(
         scripts_path,
         target_table=target_table,
         target_column=target_column,
-        filter_column=filter_column,
-        filter_value=filter_value,
+        filter_column=filter_predicates[0][0],
+        filter_value=filter_predicates[0][1],
         max_depth=max_depth,
+        filter_predicates=filter_predicates,
     )
 
     for line in lines:
