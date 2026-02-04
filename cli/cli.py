@@ -3,7 +3,7 @@ from pathlib import Path
 
 from . import db
 from .db_mock import get_mock_connection
-from .dependencies import get_dependency_ordered_objects
+from .dependencies import get_dependency_ordered_objects, build_debug_trace_plan
 from .format import format_sql
 from .diff import get_semantic_changed_files, semantic_diff, get_objects_from_files, get_db_object_details
 from .container import configure_services
@@ -193,6 +193,33 @@ def show_dependencies(ctx, ignore_prefixes, upper_case):
         click.echo("\nReferenced dependencies with no known path:")
         for dep in sorted(unknown_deps):
             click.echo(f"  - {dep}")
+
+
+@cli.command(name='trace-column-lineage')
+@click.option('--target-table', required=True, help="Target table (schema.table).")
+@click.option('--target-column', required=True, help="Target column to trace.")
+@click.option('--filter-column', required=True, help="Filter column in target table.")
+@click.option('--filter-value', required=True, help="Filter value to use in suggested queries.")
+@click.option('--max-depth', default=10, show_default=True, type=int, help="Maximum lineage depth to traverse.")
+@click.pass_context
+def trace_column_lineage(ctx, target_table, target_column, filter_column, filter_value, max_depth):
+    """
+    Trace column lineage and output a debug query plan.
+    """
+    scripts_dir = ctx.obj['scripts_dir']
+    scripts_path = Path(scripts_dir)
+
+    lines = build_debug_trace_plan(
+        scripts_path,
+        target_table=target_table,
+        target_column=target_column,
+        filter_column=filter_column,
+        filter_value=filter_value,
+        max_depth=max_depth,
+    )
+
+    for line in lines:
+        click.echo(line)
 
 if __name__ == '__main__':
     cli()
