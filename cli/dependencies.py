@@ -304,6 +304,7 @@ def build_debug_trace_plan(
     filter_value: str,
     max_depth: int = 10,
     filter_predicates: list[tuple[str, str]] | None = None,
+    table_dependency_depth: int = 5,
 ) -> list[str]:
     """
     Build a debug trace plan for a target column and filter column.
@@ -334,7 +335,7 @@ def build_debug_trace_plan(
         join_edges_by_target,
         table_columns_by_obj,
         filter_columns={col for col, _ in filter_predicates},
-        max_depth=2,
+        max_depth=table_dependency_depth,
     )
 
     lines: list[str] = []
@@ -849,33 +850,33 @@ def _extend_paths_with_table_dependencies(
 
         filtered = [
             dep for dep in candidates
-            if filter_columns & table_columns_by_obj.get(dep, set())
+            if dep in join_tables or filter_columns & table_columns_by_obj.get(dep, set())
         ]
         return filtered if filtered else candidates
+
+    def _build_dep_paths(table: str, depth: int, visiting: set[str]) -> list[list[str]]:
+        if table in visiting:
+            return []
+        if depth <= 0:
+            return [[table]]
+
+        deps = _deps_with_filters(table)
+        if not deps:
+            return [[table]]
+
+        visiting.add(table)
+        paths_out: list[list[str]] = []
+        for dep in deps:
+            for sub in _build_dep_paths(dep, depth - 1, visiting):
+                paths_out.append(sub + [table])
+        visiting.remove(table)
+        return paths_out
 
     for path in paths:
         if not path:
             continue
         source_table = _table_key(path[0])
-        dep_level = [source_table]
-
-        if max_depth >= 1:
-            deps = _deps_with_filters(source_table)
-            if deps:
-                dep_level = deps
-
-        if max_depth >= 2:
-            extended: list[list[str]] = []
-            for dep in dep_level:
-                second_level = _deps_with_filters(dep)
-                if second_level:
-                    for dep2 in second_level:
-                        extended.append([dep2, dep, source_table])
-                else:
-                    extended.append([dep, source_table])
-            dep_paths = extended
-        else:
-            dep_paths = [[dep, source_table] if dep != source_table else [source_table] for dep in dep_level]
+        dep_paths = _build_dep_paths(source_table, max_depth, set())
 
         for dep_path in dep_paths:
             merged = dep_path + path[1:]

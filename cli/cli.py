@@ -202,9 +202,10 @@ def show_dependencies(ctx, ignore_prefixes, upper_case):
 @click.option('--filter-value', required=False, help="Filter value to use in suggested queries.")
 @click.option('--query', required=False, help="Inline SQL SELECT query to parse for target table and filters.")
 @click.option('--query-file', required=False, type=click.Path(exists=True, dir_okay=False), help="Path to a SQL file containing the SELECT query.")
-@click.option('--max-depth', default=10, show_default=True, type=int, help="Maximum lineage depth to traverse.")
+@click.option('--max-depth', default=10, show_default=True, type=int, help="Maximum column lineage depth to traverse.")
+@click.option('--table-dependency-depth', default=5, show_default=True, type=int, help="Maximum table dependency expansion depth.")
 @click.pass_context
-def trace_column_lineage(ctx, target_table, target_column, filter_column, filter_value, query, query_file, max_depth):
+def trace_column_lineage(ctx, target_table, target_column, filter_column, filter_value, query, query_file, max_depth, table_dependency_depth):
     """
     Trace column lineage and output a debug query plan.
     """
@@ -258,6 +259,7 @@ def trace_column_lineage(ctx, target_table, target_column, filter_column, filter
         filter_value=filter_predicates[0][1],
         max_depth=max_depth,
         filter_predicates=filter_predicates,
+        table_dependency_depth=table_dependency_depth,
     )
 
     for line in lines:
