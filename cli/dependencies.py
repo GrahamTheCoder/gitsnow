@@ -171,6 +171,38 @@ def extract_column_lineage_edges(root_dir: Path) -> dict[str, set[str]]:
     return dict(edges_by_target)
 
 
+def extract_join_edges_by_target(root_dir: Path) -> dict[str, list[tuple[str, str, str, str]]]:
+    """
+    Scan all .sql files and return join edges per target table.
+    Each edge is (left_table, left_column, right_table, right_column).
+    """
+    sql_files = list(root_dir.rglob("**/*.sql"))
+    if not sql_files:
+        return {}
+
+    path_by_obj, _ = extract_dependency_graph(root_dir)
+    targets_by_path: dict[Path, set[str]] = defaultdict(set)
+    for obj_name, path in path_by_obj.items():
+        targets_by_path[path].add(obj_name)
+
+    edges_by_target: dict[str, list[tuple[str, str, str, str]]] = defaultdict(list)
+
+    for file_path in sql_files:
+        try:
+            file_sql = file_path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+
+        join_edges = _extract_join_edges(file_sql)
+        if not join_edges:
+            continue
+
+        for target in targets_by_path.get(file_path, set()):
+            edges_by_target[target].extend(join_edges)
+
+    return dict(edges_by_target)
+
+
 def build_column_lineage_paths(
     target_column_key: str,
     edges_by_target: dict[str, set[str]],
@@ -215,6 +247,7 @@ def build_debug_trace_plan(
     Returns a list of output lines (Snowflake SQL comments + queries).
     """
     edges_by_target = extract_column_lineage_edges(root_dir)
+    join_edges_by_target = extract_join_edges_by_target(root_dir)
     normalized_table = _normalize_table_name(target_table)
     normalized_target_col = _normalize_column_name(target_column)
     normalized_filter_col = _normalize_column_name(filter_column)
@@ -223,39 +256,8 @@ def build_debug_trace_plan(
     filter_col_key = f"{normalized_table}.{normalized_filter_col}"
 
     target_paths = build_column_lineage_paths(target_col_key, edges_by_target, max_depth=max_depth)
-    filter_paths = build_column_lineage_paths(filter_col_key, edges_by_target, max_depth=max_depth)
-
-    table_filter_columns: dict[str, set[str]] = defaultdict(set)
-    for path in filter_paths:
-        for col_key in path:
-            table_filter_columns[_table_key(col_key)].add(_column_name(col_key))
-
-    resolved_filter_columns = {
-        table: next(iter(cols))
-        for table, cols in table_filter_columns.items()
-        if len(cols) == 1
-    }
 
     lines: list[str] = []
-    lines.append("-- Start query")
-    lines.append(
-        f"select {normalized_target_col} from {normalized_table} where {normalized_filter_col} = {filter_value};"
-    )
-
-    if filter_paths:
-        lines.append("")
-        lines.append(f"-- Filter column lineage for {normalized_filter_col}")
-        for idx, path in enumerate(filter_paths, start=1):
-            lines.append(f"-- Filter path {idx}")
-            for step in range(len(path) - 1, -1, -1):
-                col_key = path[step]
-                table_key = _table_key(col_key)
-                column_name = _column_name(col_key)
-                lines.append(f"-- {table_key}")
-                lines.append(
-                    f"select * from {table_key} where {column_name} = {filter_value};"
-                )
-
     if not target_paths:
         lines.append(
             f"-- No column lineage found for {normalized_table}.{normalized_target_col}"
@@ -265,31 +267,14 @@ def build_debug_trace_plan(
     for idx, path in enumerate(target_paths, start=1):
         lines.append("")
         lines.append(f"-- Path {idx}")
-
-        # Walk from target -> sources for debugging order
-        for step in range(len(path) - 1, 0, -1):
-            downstream_col = path[step]
-            upstream_col = path[step - 1]
-            downstream_table = _table_key(downstream_col)
-            upstream_table = _table_key(upstream_col)
-
-            lines.append(f"-- {downstream_table} -> {upstream_table}")
-
-            filter_col_for_upstream = resolved_filter_columns.get(upstream_table)
-            if filter_col_for_upstream:
-                lines.append(
-                    f"select * from {upstream_table} where {filter_col_for_upstream} = {filter_value};"
-                )
-            elif upstream_table in table_filter_columns:
-                lines.append(
-                    f"-- Multiple filter column candidates found for {upstream_table}; inspect lineage."
-                )
-                lines.append(f"select * from {upstream_table};")
-            else:
-                lines.append(
-                    f"-- No filter column lineage found for {upstream_table}; inspect join keys manually."
-                )
-                lines.append(f"select * from {upstream_table};")
+        lines.extend(
+            _build_cte_chain_for_path(
+                path=path,
+                filter_column=normalized_filter_col,
+                filter_value=filter_value,
+                join_edges_by_target=join_edges_by_target,
+            )
+        )
 
     return lines
 
@@ -350,3 +335,135 @@ def _table_key(column_key: str) -> str:
 def _column_name(column_key: str) -> str:
     parts = column_key.split(".")
     return parts[2] if len(parts) >= 3 else column_key
+
+
+def _extract_join_edges(sql_text: str) -> list[tuple[str, str, str, str]]:
+    ident = r'(?:[A-Za-z_][\w$]*|"[^"]+")'
+    table_pattern = rf'{ident}(?:\s*\.\s*{ident}){{1,2}}'
+    alias_pattern = ident
+
+    alias_map: dict[str, str] = {}
+    for match in re.finditer(rf'\b(from|join)\s+({table_pattern})(?:\s+({alias_pattern}))?', sql_text, re.IGNORECASE):
+        raw_table = match.group(2)
+        raw_alias = match.group(3)
+        table_name = _normalize_table_name(raw_table)
+        alias_map[table_name] = table_name
+        if raw_alias:
+            alias_map[_strip_quotes(raw_alias).upper()] = table_name
+
+    edges: list[tuple[str, str, str, str]] = []
+    for match in re.finditer(rf'({alias_pattern})\s*\.\s*({alias_pattern})\s*=\s*({alias_pattern})\s*\.\s*({alias_pattern})', sql_text, re.IGNORECASE):
+        left_alias = _strip_quotes(match.group(1)).upper()
+        left_col = _strip_quotes(match.group(2)).upper()
+        right_alias = _strip_quotes(match.group(3)).upper()
+        right_col = _strip_quotes(match.group(4)).upper()
+
+        left_table = alias_map.get(left_alias)
+        right_table = alias_map.get(right_alias)
+        if not left_table or not right_table:
+            continue
+
+        edges.append((left_table, left_col, right_table, right_col))
+
+    return edges
+
+
+def _build_join_filter_queries(
+    upstream_table: str,
+    join_edges: list[tuple[str, str, str, str]],
+    resolved_filter_columns: dict[str, str],
+    filter_value: str,
+) -> list[str]:
+    queries: list[str] = []
+    for left_table, left_col, right_table, right_col in join_edges:
+        if left_table == upstream_table:
+            other_table = right_table
+            upstream_join_col = left_col
+            other_join_col = right_col
+        elif right_table == upstream_table:
+            other_table = left_table
+            upstream_join_col = right_col
+            other_join_col = left_col
+        else:
+            continue
+
+        filter_col = resolved_filter_columns.get(other_table)
+        if not filter_col:
+            continue
+
+        queries.append(
+            f"select * from {upstream_table} where {upstream_join_col} in (select {other_join_col} from {other_table} where {filter_col} = {filter_value});"
+        )
+
+    return queries
+
+
+def _strip_quotes(value: str) -> str:
+    return value.strip().strip('"')
+
+
+def _build_cte_chain_for_path(
+    path: list[str],
+    filter_column: str,
+    filter_value: str,
+    join_edges_by_target: dict[str, list[tuple[str, str, str, str]]],
+) -> list[str]:
+    """
+    Build a WITH CTE chain for a single lineage path.
+    Path is a list of column keys in source -> target order.
+    """
+    table_sequence = [_table_key(col) for col in path]
+    table_sequence = [table_sequence[-1]] + list(reversed(table_sequence[:-1]))
+
+    cte_lines: list[str] = []
+    cte_lines.append("with")
+
+    if not table_sequence:
+        return cte_lines
+
+    first_table = table_sequence[0]
+    cte_lines.append(
+        f"  cte_0 as (select * from {first_table} where {filter_column} = {filter_value})"
+    )
+
+    for idx in range(1, len(table_sequence)):
+        downstream_table = table_sequence[idx - 1]
+        upstream_table = table_sequence[idx]
+        join_edges = join_edges_by_target.get(downstream_table, [])
+        join_edge = _find_join_edge(downstream_table, upstream_table, join_edges)
+        if join_edge:
+            upstream_join_col, downstream_join_col, is_indirect = join_edge
+            if is_indirect:
+                cte_lines.append(
+                    f", cte_{idx} as (select * from {upstream_table} where {upstream_join_col} in (select {downstream_join_col} from cte_{idx - 1}))"
+                )
+            else:
+                cte_lines.append(
+                    f", cte_{idx} as (select * from {upstream_table} where {upstream_join_col} in (select {downstream_join_col} from cte_{idx - 1}))"
+                )
+        else:
+            cte_lines.append(
+                f", cte_{idx} as (select * from {upstream_table})"
+            )
+
+    cte_lines.append(f"select * from cte_{len(table_sequence) - 1};")
+    return cte_lines
+
+
+def _find_join_edge(
+    downstream_table: str,
+    upstream_table: str,
+    join_edges: list[tuple[str, str, str, str]],
+) -> tuple[str, str, bool] | None:
+    for left_table, left_col, right_table, right_col in join_edges:
+        if left_table == downstream_table and right_table == upstream_table:
+            return right_col, left_col, False
+        if right_table == downstream_table and left_table == upstream_table:
+            return left_col, right_col, False
+
+    for left_table, left_col, right_table, right_col in join_edges:
+        if left_table == upstream_table:
+            return left_col, right_col, True
+        if right_table == upstream_table:
+            return right_col, left_col, True
+    return None
