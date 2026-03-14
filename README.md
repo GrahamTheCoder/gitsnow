@@ -1,3 +1,5 @@
+This repo is to demonstrate an idea, feel free to take it and get your AI agent to iterate on it!
+
 # gitsnow
 
 Easily sync objects from git to snowflake (deployment), and from snowflake to git (drift detection and reintegration).
